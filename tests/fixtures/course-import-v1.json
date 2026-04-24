@@ -1,0 +1,35 @@
+{
+  "outputFormatVersion": "1.0",
+  "course": {
+    "title": "삿포로 하루 코스",
+    "startLocation": "삿포로역",
+    "tripWindow": {
+      "startAt": "2026-05-01T09:00:00Z",
+      "endAt": "2026-05-01T22:00:00Z"
+    },
+    "transportMode": "walk+subway",
+    "summary": "시장, 공원, 저녁 술집까지 이어지는 하루 코스",
+    "promptText": "generated from export fixture",
+    "stops": [
+      {
+        "placeId": "place_market_fixture",
+        "placeName": "니조시장",
+        "scheduledAt": "2026-05-01T09:30:00Z",
+        "note": "해산물 덮밥",
+        "reasoningText": "아침 영업 시간과 시작 위치가 잘 맞음",
+        "transitHint": "도보 10분"
+      },
+      {
+        "placeId": "place_park_fixture",
+        "placeName": "오도리공원",
+        "scheduledAt": "2026-05-01T13:00:00Z",
+        "note": "산책",
+        "reasoningText": "점심 이후 휴식 구간",
+        "transitHint": "지하철 1정거장"
+      }
+    ]
+  },
+  "validation": {
+    "warnings": []
+  }
+}

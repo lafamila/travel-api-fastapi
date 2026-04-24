@@ -1,0 +1,29 @@
+{
+  "outputFormatVersion": "1.0",
+  "tripWindow": {
+    "startAt": "2026-05-01T09:00:00Z",
+    "endAt": "2026-05-01T22:00:00Z"
+  },
+  "courseStart": {
+    "label": "삿포로역"
+  },
+  "selectedPlaces": [
+    {
+      "placeId": "place_abc123",
+      "name": "니조시장",
+      "latitude": 43.0588,
+      "longitude": 141.3566,
+      "address": "Sapporo",
+      "openingHours": "09:00-17:00",
+      "specialNotes": "해산물 브런치 추천",
+      "coverImageUrl": "https://example.com/nijo.jpg",
+      "reviewSummary": [
+        "아침 일찍 가면 덜 붐빈다"
+      ]
+    }
+  ],
+  "selectionContext": {
+    "theme": "food crawl",
+    "pace": "relaxed"
+  }
+}

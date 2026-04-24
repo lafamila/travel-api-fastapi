@@ -1,0 +1,15 @@
+{
+  "outputFormatVersion": "0.9",
+  "course": {
+    "title": "버전 불일치 코스",
+    "tripWindow": {
+      "startAt": "2026-05-01T09:00:00Z",
+      "endAt": "2026-05-01T22:00:00Z"
+    },
+    "stops": [
+      {
+        "placeName": "테스트 장소"
+      }
+    ]
+  }
+}

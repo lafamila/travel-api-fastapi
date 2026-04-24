@@ -1,0 +1,9 @@
+fastapi==0.115.5
+uvicorn==0.32.1
+PyMySQL==1.1.1
+python-dotenv==1.0.1
+pydantic==2.10.3
+cryptography==44.0.0
+boto3==1.37.31
+python-multipart==0.0.20
+playwright==1.49.1
