@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import uuid
+import logging
 from typing import BinaryIO
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -10,6 +11,8 @@ from urllib.request import Request, urlopen
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
+
+logger = logging.getLogger(__name__)
 
 S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "http://localhost:4566")
 S3_PUBLIC_BASE_URL = os.getenv("S3_PUBLIC_BASE_URL", "http://localhost:4566")
@@ -19,6 +22,7 @@ AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "test")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "test")
 LOCALSTACK_STATE_URL = os.getenv("LOCALSTACK_STATE_URL", S3_ENDPOINT_URL).rstrip("/")
 S3_SAVE_STATE_AFTER_UPLOAD = os.getenv("S3_SAVE_STATE_AFTER_UPLOAD", "0") == "1"
+S3_STATE_SAVE_STRICT = os.getenv("S3_STATE_SAVE_STRICT", "0") == "1"
 
 
 def get_s3_client():
@@ -94,4 +98,6 @@ def save_s3_state_after_upload() -> None:
         with urlopen(request, timeout=30) as response:
             response.read()
     except URLError as error:
-        raise RuntimeError("Failed to persist LocalStack S3 state") from error
+        logger.warning("Failed to persist LocalStack S3 state: %s", error)
+        if S3_STATE_SAVE_STRICT:
+            raise RuntimeError("Failed to persist LocalStack S3 state") from error
