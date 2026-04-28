@@ -36,6 +36,11 @@ class CourseContractTests(unittest.TestCase):
         prompt = build_prompt_text(fixture)
         self.assertIn('"outputFormatVersion": "1.0"', prompt)
         self.assertIn("여행 코스를 제안", prompt)
+        self.assertIn("import API에 바로 넣을 수 있는 JSON", prompt)
+        self.assertIn('"course"', prompt)
+        self.assertIn('"stops"', prompt)
+        self.assertIn("order 필드는 넣지 마세요", prompt)
+        self.assertIn("selectedPlaces[].placeId 중 하나를 그대로 사용", prompt)
 
     def test_valid_import_fixture_passes(self):
         fixture = json.loads((FIXTURE_DIR / "course-import-v1.json").read_text())
