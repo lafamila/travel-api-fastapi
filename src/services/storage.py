@@ -4,6 +4,8 @@ import os
 import re
 import uuid
 from typing import BinaryIO
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 import boto3
 from botocore.config import Config
@@ -15,6 +17,8 @@ S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "teddy-travel-media")
 S3_REGION = os.getenv("S3_REGION", "ap-northeast-2")
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "test")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "test")
+LOCALSTACK_STATE_URL = os.getenv("LOCALSTACK_STATE_URL", S3_ENDPOINT_URL).rstrip("/")
+S3_SAVE_STATE_AFTER_UPLOAD = os.getenv("S3_SAVE_STATE_AFTER_UPLOAD", "0") == "1"
 
 
 def get_s3_client():
@@ -67,6 +71,7 @@ def upload_image(file_obj: BinaryIO, filename: str, content_type: str, folder: s
             "ContentType": content_type or "application/octet-stream",
         },
     )
+    save_s3_state_after_upload()
 
     public_base = S3_PUBLIC_BASE_URL.rstrip("/")
     return {
@@ -75,3 +80,18 @@ def upload_image(file_obj: BinaryIO, filename: str, content_type: str, folder: s
         "contentType": content_type or "application/octet-stream",
         "filename": filename,
     }
+
+
+def save_s3_state_after_upload() -> None:
+    if not S3_SAVE_STATE_AFTER_UPLOAD:
+        return
+
+    request = Request(
+        f"{LOCALSTACK_STATE_URL}/_localstack/state/s3/save",
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            response.read()
+    except URLError as error:
+        raise RuntimeError("Failed to persist LocalStack S3 state") from error
