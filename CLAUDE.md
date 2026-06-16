@@ -12,7 +12,7 @@ FastAPI backend for travel places/courses — stores user-tagged map markers, ge
 2. **기능 단위 커밋** — 한 기능이 계획-구현-검토를 통과하면 즉시 1개의 커밋. 여러 기능을 묶지 않는다.
 3. **Agent co-author 제외** — Codex, Claude, OmX 등 agent/tool 저자를 `Co-authored-by` trailer 로 추가하지 않는다. 사용자가 명시적으로 요청한 경우만 예외.
 4. **계획 → 구현 → 검토** — 계획 단계에서 검토 통과 기준(어떤 테스트/명령이 통과해야 "done"인지)을 명시한다.
-5. **Docker 빌드 가능** — DEPLOY. 루트 `docker-compose.yml` 의 `travel-fastapi` 서비스 (포트 8010). mysql (healthy) + localstack (started) 의존. Dockerfile 유지 필수.
+5. **Docker 빌드 가능** — DEPLOY. 이 레포는 포트 `8010` 의 독립 배포 API 이며 Dockerfile 유지가 필수다. 앱 컨테이너는 root compose 에 묶지 않고, DB 와 S3 는 shared root infra 또는 외부 운영 infra 에 연결한다.
 6. **Cross-repo 영향 보고** — 이 레포의 변경이 다른 repo, 공통 API 계약, auth claim/permission, env var, Docker/deploy 설정, 공통 문서에 영향을 준다고 판단되면 현재 orchestrator 에게 반드시 보고한다. 직접 보고할 수 없으면 워크스페이스 루트 `../.idea/` 에 `{REPO_NAME}_CROSS_REPO_IMPACT_{YYYYMMDD}.md` 형식의 handoff 문서를 남긴다.
 7. **사용자 결정 필요사항 에스컬레이션** — 사용자가 결정해야 하는 주요 사안은 임의로 판단하지 않고 작업을 중단한 뒤 현재 orchestrator 에게 전달하여 결정받고 진행한다. orchestrator 에 보고할 수 없으면 workspace root `../.idea/` 에 handoff 문서를 남긴다.
 
@@ -21,7 +21,7 @@ FastAPI backend for travel places/courses — stores user-tagged map markers, ge
 1. `.idea/` 또는 신규 계획 문서에서 기능을 선택
 2. 계획서 작성 — 변경 파일, 인터페이스, **검토 통과 기준** 명시
 3. 구현
-4. 통과 기준 만족 여부 직접 실행/테스트 (`uvicorn src.__main__:app --port 8010` 또는 `docker compose up travel-fastapi`)
+4. 통과 기준 만족 여부 직접 실행/테스트 (`uvicorn src.__main__:app --port 8010`, 필요 시 `docker build -t travel-api-fastapi .`)
 5. 통과 시 1개의 커밋으로 마무리
 
 ## STRUCTURE
@@ -48,19 +48,23 @@ requirements.txt
 ```bash
 pip install -r requirements.txt
 uvicorn src.__main__:app --port 8010
-# or
-docker compose up travel-fastapi
+docker build -t travel-api-fastapi .
+# deploy/run example
+docker run --rm --env-file .env -p 8010:8010 travel-api-fastapi
 ```
 
 ## ENVIRONMENT
 
-- `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` — MySQL (`teddy-mysql` 컨테이너, DB 이름 `travelnote`)
+- `.env.example` 를 기준으로 env shape 를 맞춘다.
+- `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` — shared root MySQL/MariaDB 또는 외부 운영 DB. 로컬 기본 DB 이름은 `travelnote`.
 - `S3_ENDPOINT_URL`, `S3_PUBLIC_BASE_URL`, `S3_BUCKET_NAME`, `S3_REGION`
-- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_DEFAULT_REGION` — LocalStack 또는 실제 S3
-- 운영 S3 public base: `https://s3.lafamila.xyz` / 로컬: `http://localstack:4566`
+- `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_DEFAULT_REGION` — shared root LocalStack 또는 실제 S3
+- `LOCALSTACK_STATE_URL`, `S3_SAVE_STATE_AFTER_UPLOAD`, `S3_STATE_SAVE_STRICT` — LocalStack state save 를 쓸 때만 설정
+- 로컬에서는 shared root infra 의 MySQL/MariaDB + LocalStack 을 재사용하고, 독립 배포 시에는 해당 값을 운영 DB/S3 endpoint 로 교체한다.
 
 ## NOTES
 
-- todo-api-fastapi 와 같은 스택/패턴. 같은 mysql 컨테이너 공유 (다른 DB 이름: `travelnote`).
-- `.idea/` 는 현재 비어있음. 새 계획은 `/idea-new` 후 `/idea-build` 로 이쪽 `.idea/` 에 들어옴.
+- todo-api-fastapi 와 같은 스택/패턴. 같은 종류 third-party infra 는 앱별 전용 컨테이너 대신 shared root infra 또는 외부 managed infra 를 우선 사용한다.
+- beer-house 쪽 `TRAVEL_API_BASE_URL` 같은 cross-repo 호출 계약은 유지되며, 이 레포 변경으로 env key/port contract 는 바뀌지 않는다.
+- `.idea/` 에 repo execution plan 이 들어올 수 있다. 새 계획도 `/idea-new` 후 `/idea-build` 로 이쪽 `.idea/` 에 누적된다.
 - 도메인 모델/엔드포인트가 잡히면 이 가이드에 ENDPOINTS 표를 추가하세요 (todo-api-fastapi/CLAUDE.md 참조).
