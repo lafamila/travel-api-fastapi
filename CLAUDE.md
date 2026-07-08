@@ -4,6 +4,11 @@ FastAPI backend for travel places/courses — stores user-tagged map markers, ge
 
 > 이 파일이 본 레포의 canonical 가이드입니다. `AGENTS.md` 는 codex 호환용 stub 입니다.
 
+- **Lifecycle**: DEPLOY
+- **Status**: active
+- **Port**: 8010
+- **Auth**: NO_AUTH (beer-house BFF 뒤 내부 API — auth-api-nest 운영 후 통합 예정)
+
 ## 워크스페이스 대원칙 (canonical)
 
 이 레포는 `../CLAUDE.md` 의 **DEVELOPMENT PRINCIPLES** 섹션을 따른다. 핵심 재진술:
@@ -26,14 +31,42 @@ FastAPI backend for travel places/courses — stores user-tagged map markers, ge
 
 ## STRUCTURE
 
+routers/services/schemas 멀티모듈 구조다 (초기의 single-file 패턴에서 진화함):
+
 ```
-src/                # FastAPI 엔트리 (todo-api-fastapi 와 같은 single-file + connectors 패턴)
-tests/
-Dockerfile
+src/
+├── __main__.py                 # FastAPI app 생성(lifespan: init_db + ensure_bucket + Playwright browser), 라우터 등록
+├── connectors/__init__.py      # MySQL config, get_db_connection(), init_db() DDL
+├── routers/
+│   ├── places.py               # /api/places — CRUD, 리뷰, resolve-google-link
+│   ├── courses.py              # /api/courses — CRUD, export/import
+│   └── uploads.py              # /api/uploads — S3 미디어 업로드
+├── schemas.py                  # Pydantic request/response 모델
+├── services/
+│   ├── storage.py              # S3/LocalStack 클라이언트, ensure_bucket, presign
+│   ├── google_maps_links.py    # Google Maps 링크 해석 (Playwright)
+│   └── course_contract.py      # AI-friendly course prompt JSON 계약
+└── utils.py
+tests/                          # unittest — course_contract, storage
+Dockerfile                      # Playwright Chromium 포함, HEALTHCHECK 포함
 requirements.txt
 ```
 
-> 모듈 분할이나 라우터 구조가 todo-api-fastapi 와 다르게 진화하면 이 섹션을 그때 갱신하세요.
+## ENDPOINTS
+
+`src/routers/` 의 라우트 정의가 canonical 이다 (총 14개, 전부 `/api/*`):
+
+| Router | Routes |
+|--------|--------|
+| `places.py` (`/api/places`) | `GET/POST /api/places`, `GET/PUT/DELETE /api/places/{place_id}`, `POST /api/places/resolve-google-link`, `POST /api/places/{place_id}/reviews` |
+| `courses.py` (`/api/courses`) | `GET/POST /api/courses`, `GET/DELETE /api/courses/{course_id}`, `POST /api/courses/export`, `POST /api/courses/import` |
+| `uploads.py` (`/api/uploads`) | `POST /api/uploads` |
+
+전용 health 엔드포인트는 없다 (Docker HEALTHCHECK 는 `GET /docs` 사용).
+
+## DATABASE
+
+`src/connectors/__init__.py` `init_db()` 가 canonical — `travel_places`, `travel_place_reviews`, `travel_courses`, `travel_course_stops` 4개 테이블 (기본 DB 이름 `travelnote`).
 
 ## DEPENDENCIES (requirements.txt)
 
