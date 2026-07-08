@@ -31,4 +31,9 @@ COPY tests/ ./tests/
 
 EXPOSE 8010
 
+# 전용 health 라우트가 없어 FastAPI 기본 /docs 로 liveness 확인 (라우트 추가 시 /api/health 로 교체)
+# start-period 는 Playwright Chromium 기동 시간을 고려해 여유 있게 둔다
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/docs', timeout=4)" || exit 1
+
 CMD ["uvicorn", "src.__main__:app", "--host", "0.0.0.0", "--port", "8010"]
