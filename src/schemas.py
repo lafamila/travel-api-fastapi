@@ -16,6 +16,7 @@ TravelPlaceCategory = Literal[
     "stay",
     "other",
 ]
+TravelPlaceVisibility = Literal["public", "private"]
 
 
 class TravelReview(BaseModel):
@@ -28,6 +29,10 @@ class TravelReview(BaseModel):
     photoUrls: list[str] = Field(default_factory=list)
     createdAt: str
     updatedAt: str
+    authorAccountId: str
+    authorLoginId: str
+    authorName: str
+    authorEmail: str | None = None
 
 
 class TravelReviewCreateRequest(BaseModel):
@@ -50,6 +55,7 @@ class TravelPlaceBase(BaseModel):
     coverImageUrl: str | None = None
     photoUrls: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
+    visibility: TravelPlaceVisibility = "public"
 
 
 class TravelPlaceCreateRequest(TravelPlaceBase):
@@ -72,6 +78,7 @@ class TravelPlaceUpdateRequest(BaseModel):
     coverImageUrl: str | None = None
     photoUrls: list[str] | None = None
     tags: list[str] | None = None
+    visibility: TravelPlaceVisibility | None = None
 
 
 class TravelPlace(TravelPlaceBase):
@@ -79,6 +86,10 @@ class TravelPlace(TravelPlaceBase):
     createdAt: str
     updatedAt: str
     reviews: list[TravelReview] = Field(default_factory=list)
+    ownerAccountId: str
+    ownerLoginId: str
+    ownerName: str
+    ownerEmail: str | None = None
 
 
 class GoogleMapsLinkResolution(BaseModel):
@@ -152,6 +163,10 @@ class TravelCourse(BaseModel):
     stops: list[TravelCourseStop] = Field(default_factory=list)
     createdAt: str
     updatedAt: str
+    ownerAccountId: str
+    ownerLoginId: str
+    ownerName: str
+    ownerEmail: str | None = None
 
 
 class TravelCourseCreateRequest(BaseModel):
@@ -177,3 +192,42 @@ class CourseImportPayload(BaseModel):
         if value != OUTPUT_FORMAT_VERSION:
             raise ValueError("Unsupported outputFormatVersion")
         return value
+
+
+class SessionOidcStartRequest(BaseModel):
+    returnTo: str | None = None
+
+
+class ServiceApplicationRequest(BaseModel):
+    message: str | None = ""
+
+
+class FriendRequestCreateRequest(BaseModel):
+    accountId: str = Field(min_length=1)
+    loginId: str = Field(min_length=1)
+
+
+class FriendAccount(BaseModel):
+    accountId: str
+    loginId: str
+    name: str
+    email: str | None = None
+
+
+class FriendSearchResult(FriendAccount):
+    permission: str
+    isSuperAdmin: bool = False
+
+
+class FriendRequestView(BaseModel):
+    id: str
+    status: str
+    requester: FriendAccount
+    addressee: FriendAccount
+    createdAt: str
+    respondedAt: str | None = None
+
+
+class FriendshipView(BaseModel):
+    friend: FriendAccount
+    createdAt: str

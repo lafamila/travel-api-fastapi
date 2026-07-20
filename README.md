@@ -1,20 +1,45 @@
 # travel-api-fastapi
 
-FastAPI backend for travel places/courses — user-tagged map markers, AI-friendly course prompt JSON, S3 media uploads, Playwright 기반 Google Maps 링크 해석.
+Account-scoped FastAPI backend for travel places and courses. It owns the
+`auth-api-nest` OIDC session, friend relationships, friend-only public-place
+sharing, S3 media uploads, and Playwright-based Google Maps link resolution.
 
-- Lifecycle: `DEPLOY` · Port: `8010` · Auth: `NO_AUTH` (beer-house BFF 뒤 내부 API)
-- 상세 가이드(구조, 엔드포인트, DB, 원칙)는 `CLAUDE.md` 참조.
+- Lifecycle: `DEPLOY`
+- Port: `8010`
+- Auth service key: `travel`
+- Public production API: `https://map.lafamila.xyz/api/*`
 
-## Run (local)
+## Local setup
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 playwright install chromium
-cp .env.example .env   # 값 채우기 (.env 는 커밋 금지)
+cp .env.example .env
 uvicorn src.__main__:app --port 8010
 ```
+
+The auth service must have the `travel` confidential OIDC client and service
+credential described in `CLAUDE.md`. The browser stores only the opaque
+`teddy_travel_session` HttpOnly cookie; access tokens, refresh tokens, the OIDC
+client secret, and service credentials remain in this API process.
+
+At startup the schema is extended idempotently. If legacy places, reviews, or
+courses have no account metadata, the API searches auth for the exact
+`TRAVEL_LEGACY_OWNER_LOGIN_ID` (default `lafamila`) and migrates those rows. A
+missing or non-unique exact account match fails startup instead of assigning
+legacy data to the wrong owner.
+
+## Authorization model
+
+- `visitor`: session and access-application endpoints only.
+- `user`: own places/courses; friends' public places and reviews.
+- `admin`: `user` access plus Google Maps link crawling.
+- `superadmin`: unrestricted travel data management and crawling.
+- Public places are visible only to accepted friends, not to arbitrary users.
+- Courses remain private to their owner; stops may reference own places or an
+  accepted friend's public places.
 
 ## Test
 
@@ -29,12 +54,6 @@ docker build -t travel-api-fastapi .
 docker run --rm --env-file .env -p 8010:8010 travel-api-fastapi
 ```
 
-이미지에는 Playwright Chromium 과 `GET /docs` 기반 HEALTHCHECK 가 포함된다.
-
-## Dependencies
-
-- **MySQL/MariaDB** — `DB_*` env. 로컬은 shared root infra compose 재사용, 기본 DB 이름 `travelnote`. 스키마는 startup 시 `init_db()` 가 자동 생성.
-- **S3 (LocalStack)** — `S3_*` / `AWS_*` env. 로컬은 shared root LocalStack(`http://localhost:4566`), 운영은 실제 S3 endpoint 로 교체. startup 시 `ensure_bucket()` 이 버킷을 보장한다.
-- **Playwright Chromium** — URL 미리보기/Google Maps 링크 해석용. lifespan 에서 브라우저를 1회 기동해 공유한다.
-
-env 키 전체 목록은 `.env.example` 이 canonical 이다.
+The image includes Playwright Chromium and uses `GET /docs` for its liveness
+check. MySQL/MariaDB and S3/LocalStack remain external dependencies configured
+through `.env.example`.

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request, status
+import asyncio
+import logging
 
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+
+from ..auth_utils import get_current_user, require_admin
 from ..connectors import get_db_connection
 from ..schemas import (
     GoogleMapsLinkResolution,
@@ -12,6 +16,12 @@ from ..schemas import (
     TravelReview,
     TravelReviewCreateRequest,
 )
+from ..services.authorization import (
+    are_friends,
+    can_manage_place,
+    can_review_place,
+    can_view_place,
+)
 from ..services.google_maps_links import (
     crawl_google_maps_place,
     parse_google_maps_url,
@@ -20,6 +30,19 @@ from ..services.google_maps_links import (
 from ..utils import dump_json, generate_id, parse_json_list, to_mysql_datetime
 
 router = APIRouter(prefix="/api/places", tags=["places"])
+logger = logging.getLogger(__name__)
+
+PLACE_COLUMNS = """
+    id, name, category, latitude, longitude, address, description,
+    opening_hours, special_notes, cover_image_url, photo_urls_json, tags_json,
+    owner_account_id, owner_login_id, owner_name, owner_email, visibility,
+    created_at, updated_at
+"""
+REVIEW_COLUMNS = """
+    id, place_id, rating, headline, body, visited_at, photo_urls_json,
+    author_account_id, author_login_id, author_name, author_email,
+    created_at, updated_at
+"""
 
 
 def _map_review(row: dict) -> TravelReview:
@@ -33,6 +56,10 @@ def _map_review(row: dict) -> TravelReview:
         photoUrls=parse_json_list(row.get("photo_urls_json")),
         createdAt=row["created_at"].isoformat(),
         updatedAt=row["updated_at"].isoformat(),
+        authorAccountId=row["author_account_id"],
+        authorLoginId=row["author_login_id"],
+        authorName=row["author_name"],
+        authorEmail=row.get("author_email"),
     )
 
 
@@ -50,10 +77,28 @@ def _map_place(row: dict, reviews: list[TravelReview] | None = None) -> TravelPl
         coverImageUrl=row["cover_image_url"],
         photoUrls=parse_json_list(row.get("photo_urls_json")),
         tags=parse_json_list(row.get("tags_json")),
+        visibility=row["visibility"],
+        ownerAccountId=row["owner_account_id"],
+        ownerLoginId=row["owner_login_id"],
+        ownerName=row["owner_name"],
+        ownerEmail=row.get("owner_email"),
         createdAt=row["created_at"].isoformat(),
         updatedAt=row["updated_at"].isoformat(),
         reviews=reviews or [],
     )
+
+
+def _fetch_place_row(cursor, place_id: str, user: dict) -> dict:
+    cursor.execute(
+        f"SELECT {PLACE_COLUMNS} FROM travel_places WHERE id = %s", (place_id,)
+    )
+    row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Place not found")
+    friendship = are_friends(cursor, user["account_id"], row["owner_account_id"])
+    if not can_view_place(user, row, friendship):
+        raise HTTPException(status_code=404, detail="Place not found")
+    return row
 
 
 @router.get("", response_model=list[TravelPlace])
@@ -62,46 +107,53 @@ async def get_places(
     sw_lng: float | None = None,
     ne_lat: float | None = None,
     ne_lng: float | None = None,
+    user: dict = Depends(get_current_user),
 ):
+    conditions = []
+    values: list = []
+    if user["permission"] != "superadmin":
+        conditions.append(
+            """
+            (p.owner_account_id = %s OR (
+                p.visibility = 'public' AND EXISTS (
+                    SELECT 1 FROM travel_friendships f
+                    WHERE (f.account_a_id = %s AND f.account_b_id = p.owner_account_id)
+                       OR (f.account_b_id = %s AND f.account_a_id = p.owner_account_id)
+                )
+            ))
+            """
+        )
+        values.extend([user["account_id"]] * 3)
+    bounds = (sw_lat, sw_lng, ne_lat, ne_lng)
+    if all(value is not None for value in bounds):
+        conditions.extend(
+            [
+                "p.latitude BETWEEN %s AND %s",
+                "p.longitude BETWEEN %s AND %s",
+            ]
+        )
+        values.extend([sw_lat, ne_lat, sw_lng, ne_lng])
+    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     with get_db_connection() as connection:
         with connection.cursor() as cursor:
-            if (
-                sw_lat is not None
-                and sw_lng is not None
-                and ne_lat is not None
-                and ne_lng is not None
-            ):
-                cursor.execute(
-                    """
-                    SELECT id, name, category, latitude, longitude, address, description,
-                           opening_hours, special_notes, cover_image_url,
-                           photo_urls_json, tags_json, created_at, updated_at
-                    FROM travel_places
-                    WHERE latitude BETWEEN %s AND %s
-                      AND longitude BETWEEN %s AND %s
-                    ORDER BY updated_at DESC
-                    """,
-                    (sw_lat, ne_lat, sw_lng, ne_lng),
-                )
-            else:
-                cursor.execute(
-                    """
-                    SELECT id, name, category, latitude, longitude, address, description,
-                           opening_hours, special_notes, cover_image_url,
-                           photo_urls_json, tags_json, created_at, updated_at
-                    FROM travel_places
-                    ORDER BY updated_at DESC
-                    """
-                )
-            rows = cursor.fetchall()
-
-    return [_map_place(row) for row in rows]
+            cursor.execute(
+                f"""
+                SELECT {PLACE_COLUMNS}
+                FROM travel_places p
+                {where_clause}
+                ORDER BY p.updated_at DESC
+                """,
+                values,
+            )
+            return [_map_place(row) for row in cursor.fetchall()]
 
 
 @router.post("", response_model=TravelPlace, status_code=status.HTTP_201_CREATED)
-async def create_place(data: TravelPlaceCreateRequest):
+async def create_place(
+    data: TravelPlaceCreateRequest,
+    user: dict = Depends(get_current_user),
+):
     place_id = generate_id("place")
-
     with get_db_connection() as connection:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -109,8 +161,10 @@ async def create_place(data: TravelPlaceCreateRequest):
                 INSERT INTO travel_places (
                     id, name, category, latitude, longitude, address, description,
                     opening_hours, special_notes, cover_image_url,
-                    photo_urls_json, tags_json
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    photo_urls_json, tags_json, visibility,
+                    owner_account_id, owner_login_id, owner_name, owner_email
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                          %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     place_id,
@@ -125,58 +179,42 @@ async def create_place(data: TravelPlaceCreateRequest):
                     data.coverImageUrl,
                     dump_json(data.photoUrls),
                     dump_json(data.tags),
+                    data.visibility,
+                    user["account_id"],
+                    user["login_id"],
+                    user["name"],
+                    user.get("email"),
                 ),
             )
             cursor.execute(
-                """
-                SELECT id, name, category, latitude, longitude, address, description,
-                       opening_hours, special_notes, cover_image_url,
-                       photo_urls_json, tags_json, created_at, updated_at
-                FROM travel_places
-                WHERE id = %s
-                """,
+                f"SELECT {PLACE_COLUMNS} FROM travel_places WHERE id = %s",
                 (place_id,),
             )
-            row = cursor.fetchone()
-
-    return _map_place(row)
+            return _map_place(cursor.fetchone())
 
 
 @router.post("/resolve-google-link", response_model=GoogleMapsLinkResolution)
 async def resolve_google_link(
-    data: ResolveGoogleMapsLinkRequest, request: Request
+    data: ResolveGoogleMapsLinkRequest,
+    request: Request,
+    user: dict = Depends(require_admin),
 ):
-    import asyncio
-
-    import logging
-    logger = logging.getLogger(__name__)
-
-    # Resolve redirects in a thread to avoid blocking the event loop
+    _ = user
     try:
         resolved_url = await asyncio.to_thread(resolve_google_maps_url, data.url)
         parsed = parse_google_maps_url(resolved_url)
-        logger.info(
-            "resolve-google-link: resolved=%s query=%s lat=%s lng=%s",
-            resolved_url, parsed.query_text, parsed.latitude, parsed.longitude,
-        )
     except Exception as error:
         logger.warning("resolve-google-link failed: %s", error)
         raise HTTPException(
             status_code=400,
             detail=f"Failed to resolve Google Maps link: {error}",
         ) from error
-
-    # Must have at least a name OR coordinates
     if parsed.latitude is None or parsed.longitude is None:
         if not parsed.query_text:
             raise HTTPException(
                 status_code=400,
                 detail="Could not extract coordinates or place name from the Google Maps link",
             )
-        # Has name but no coords — still try crawling, which may extract coords from the page
-        logger.info("No coords from URL parse, will attempt crawling for name: %s", parsed.query_text)
-
-    # Try Playwright crawling for enriched data
     crawled = None
     browser = getattr(request.app.state, "browser", None)
     if browser:
@@ -187,75 +225,57 @@ async def resolve_google_link(
             parsed.latitude,
             parsed.longitude,
         )
-        logger.info("crawl result: %s", crawled)
-
-    # Determine final values: prefer crawled data, fallback to URL-parsed
     final_name = (crawled or {}).get("name") or parsed.query_text or "Unknown Place"
     final_lat = (crawled or {}).get("latitude") or parsed.latitude
     final_lng = (crawled or {}).get("longitude") or parsed.longitude
-    final_address = (crawled or {}).get("address")
-    final_hours = (crawled or {}).get("openingHours")
-    final_type = (crawled or {}).get("primaryType")
-
-    # After all attempts, must have coordinates
     if final_lat is None or final_lng is None:
         raise HTTPException(
             status_code=400,
             detail="Could not extract coordinates from the Google Maps link",
         )
-
     return GoogleMapsLinkResolution(
         resolvedUrl=resolved_url,
         googlePlaceId=None,
         googleMapsUri=None,
         name=final_name,
-        address=final_address,
+        address=(crawled or {}).get("address"),
         latitude=final_lat,
         longitude=final_lng,
-        openingHours=final_hours,
-        primaryType=final_type,
+        openingHours=(crawled or {}).get("openingHours"),
+        primaryType=(crawled or {}).get("primaryType"),
     )
 
 
 @router.get("/{place_id}", response_model=TravelPlace)
-async def get_place(place_id: str):
+async def get_place(
+    place_id: str,
+    user: dict = Depends(get_current_user),
+):
     with get_db_connection() as connection:
         with connection.cursor() as cursor:
+            row = _fetch_place_row(cursor, place_id, user)
             cursor.execute(
-                """
-                SELECT id, name, category, latitude, longitude, address, description,
-                       opening_hours, special_notes, cover_image_url,
-                       photo_urls_json, tags_json, created_at, updated_at
-                FROM travel_places
-                WHERE id = %s
-                """,
-                (place_id,),
-            )
-            row = cursor.fetchone()
-            if not row:
-                raise HTTPException(status_code=404, detail="Place not found")
-
-            cursor.execute(
-                """
-                SELECT id, place_id, rating, headline, body, visited_at,
-                       photo_urls_json, created_at, updated_at
+                f"""
+                SELECT {REVIEW_COLUMNS}
                 FROM travel_place_reviews
                 WHERE place_id = %s
                 ORDER BY created_at DESC
                 """,
                 (place_id,),
             )
-            reviews = [_map_review(review_row) for review_row in cursor.fetchall()]
-
-    return _map_place(row, reviews)
+            reviews = [_map_review(review) for review in cursor.fetchall()]
+            return _map_place(row, reviews)
 
 
 @router.put("/{place_id}", response_model=TravelPlace)
-async def update_place(place_id: str, data: TravelPlaceUpdateRequest):
+async def update_place(
+    place_id: str,
+    data: TravelPlaceUpdateRequest,
+    user: dict = Depends(get_current_user),
+):
     update_fields = data.model_dump(exclude_none=True)
     if not update_fields:
-        return await get_place(place_id)
-
+        return await get_place(place_id, user)
     field_map = {
         "name": "name",
         "category": "category",
@@ -268,36 +288,52 @@ async def update_place(place_id: str, data: TravelPlaceUpdateRequest):
         "coverImageUrl": "cover_image_url",
         "photoUrls": "photo_urls_json",
         "tags": "tags_json",
+        "visibility": "visibility",
     }
     clauses = []
     values = []
     for key, value in update_fields.items():
-        column = field_map[key]
-        clauses.append(f"{column} = %s")
-        if key in {"photoUrls", "tags"}:
-            values.append(dump_json(value))
-        else:
-            values.append(value)
+        clauses.append(f"{field_map[key]} = %s")
+        values.append(dump_json(value) if key in {"photoUrls", "tags"} else value)
     values.append(place_id)
-
     with get_db_connection() as connection:
         with connection.cursor() as cursor:
-            cursor.execute("SELECT id FROM travel_places WHERE id = %s", (place_id,))
-            if not cursor.fetchone():
+            cursor.execute(
+                f"SELECT {PLACE_COLUMNS} FROM travel_places WHERE id = %s",
+                (place_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
                 raise HTTPException(status_code=404, detail="Place not found")
-
+            if not can_manage_place(user, row):
+                raise HTTPException(
+                    status_code=403, detail="Place owner access required"
+                )
             cursor.execute(
                 f"UPDATE travel_places SET {', '.join(clauses)} WHERE id = %s",
                 values,
             )
-
-    return await get_place(place_id)
+    return await get_place(place_id, user)
 
 
 @router.delete("/{place_id}")
-async def delete_place(place_id: str):
+async def delete_place(
+    place_id: str,
+    user: dict = Depends(get_current_user),
+):
     with get_db_connection() as connection:
         with connection.cursor() as cursor:
+            cursor.execute(
+                f"SELECT {PLACE_COLUMNS} FROM travel_places WHERE id = %s",
+                (place_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Place not found")
+            if not can_manage_place(user, row):
+                raise HTTPException(
+                    status_code=403, detail="Place owner access required"
+                )
             cursor.execute(
                 "SELECT id FROM travel_course_stops WHERE place_id = %s LIMIT 1",
                 (place_id,),
@@ -307,11 +343,7 @@ async def delete_place(place_id: str):
                     status_code=409,
                     detail="Place is referenced by an existing course and cannot be deleted",
                 )
-
             cursor.execute("DELETE FROM travel_places WHERE id = %s", (place_id,))
-            if cursor.rowcount == 0:
-                raise HTTPException(status_code=404, detail="Place not found")
-
     return {"message": "Place deleted"}
 
 
@@ -320,20 +352,34 @@ async def delete_place(place_id: str):
     response_model=TravelReview,
     status_code=status.HTTP_201_CREATED,
 )
-async def create_review(place_id: str, data: TravelReviewCreateRequest):
+async def create_review(
+    place_id: str,
+    data: TravelReviewCreateRequest,
+    user: dict = Depends(get_current_user),
+):
     review_id = generate_id("review")
-
     with get_db_connection() as connection:
         with connection.cursor() as cursor:
-            cursor.execute("SELECT id FROM travel_places WHERE id = %s", (place_id,))
-            if not cursor.fetchone():
+            cursor.execute(
+                f"SELECT {PLACE_COLUMNS} FROM travel_places WHERE id = %s",
+                (place_id,),
+            )
+            place = cursor.fetchone()
+            if not place:
                 raise HTTPException(status_code=404, detail="Place not found")
-
+            friendship = are_friends(
+                cursor, user["account_id"], place["owner_account_id"]
+            )
+            if not can_review_place(user, place, friendship):
+                raise HTTPException(
+                    status_code=403, detail="Place review access denied"
+                )
             cursor.execute(
                 """
                 INSERT INTO travel_place_reviews (
-                    id, place_id, rating, headline, body, visited_at, photo_urls_json
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    id, place_id, rating, headline, body, visited_at, photo_urls_json,
+                    author_account_id, author_login_id, author_name, author_email
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     review_id,
@@ -343,17 +389,14 @@ async def create_review(place_id: str, data: TravelReviewCreateRequest):
                     data.body,
                     to_mysql_datetime(data.visitedAt),
                     dump_json(data.photoUrls),
+                    user["account_id"],
+                    user["login_id"],
+                    user["name"],
+                    user.get("email"),
                 ),
             )
             cursor.execute(
-                """
-                SELECT id, place_id, rating, headline, body, visited_at,
-                       photo_urls_json, created_at, updated_at
-                FROM travel_place_reviews
-                WHERE id = %s
-                """,
+                f"SELECT {REVIEW_COLUMNS} FROM travel_place_reviews WHERE id = %s",
                 (review_id,),
             )
-            row = cursor.fetchone()
-
-    return _map_review(row)
+            return _map_review(cursor.fetchone())

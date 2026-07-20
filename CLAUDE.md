@@ -7,13 +7,13 @@ FastAPI backend for travel places/courses — stores user-tagged map markers, ge
 - **Lifecycle**: DEPLOY
 - **Status**: active
 - **Port**: 8010
-- **Auth**: NO_AUTH (beer-house BFF 뒤 내부 API — auth-api-nest 운영 후 통합 예정)
+- **Auth**: auth-api-nest OIDC session (`serviceKey=travel`)
 
 ## 워크스페이스 대원칙 (canonical)
 
 이 레포는 `../CLAUDE.md` 의 **DEVELOPMENT PRINCIPLES** 섹션을 따른다. 핵심 재진술:
 
-1. **인증** — 현재 인증 없음. 워크스페이스 루트 `.idea/TRAVEL_IDEA.md` 에 "추후 AUTHENTICATION 통합 시점에 구현 예정" 으로 명시됨. `auth-api-nest` 가 운영에 올라간 뒤 그쪽으로 연동.
+1. **인증** — 이 API가 confidential OIDC client와 HttpOnly cookie session을 소유한다. 브라우저에는 access/refresh token, client secret, service credential을 노출하지 않는다.
 2. **기능 단위 커밋** — 한 기능이 계획-구현-검토를 통과하면 즉시 1개의 커밋. 여러 기능을 묶지 않는다.
 3. **Agent co-author 제외** — Codex, Claude, OmX 등 agent/tool 저자를 `Co-authored-by` trailer 로 추가하지 않는다. 사용자가 명시적으로 요청한 경우만 예외.
 4. **계획 → 구현 → 검토** — 계획 단계에서 검토 통과 기준(어떤 테스트/명령이 통과해야 "done"인지)을 명시한다.
@@ -36,15 +36,22 @@ routers/services/schemas 멀티모듈 구조다 (초기의 single-file 패턴에
 ```
 src/
 ├── __main__.py                 # FastAPI app 생성(lifespan: init_db + ensure_bucket + Playwright browser), 라우터 등록
-├── connectors/__init__.py      # MySQL config, get_db_connection(), init_db() DDL
+├── config.py                   # auth/session/CORS env 계약
+├── token_verifier.py           # auth JWKS cache + issuer/audience/service claim 검증
+├── auth_utils.py               # cookie/bearer current user, visitor/admin dependency
+├── connectors/__init__.py      # MySQL DDL, idempotent ownership migration
 ├── routers/
 │   ├── places.py               # /api/places — CRUD, 리뷰, resolve-google-link
 │   ├── courses.py              # /api/courses — CRUD, export/import
+│   ├── friends.py              # /api/friends — 검색/요청/수락/거절/삭제
+│   ├── session.py              # /api/session — OIDC/session/access application
 │   └── uploads.py              # /api/uploads — S3 미디어 업로드
 ├── schemas.py                  # Pydantic request/response 모델
 ├── services/
 │   ├── storage.py              # S3/LocalStack 클라이언트, ensure_bucket, presign
 │   ├── google_maps_links.py    # Google Maps 링크 해석 (Playwright)
+│   ├── authorization.py        # 장소/코스 owner/friend/superadmin 규칙
+│   ├── session_auth.py         # PKCE OIDC, in-memory refresh/session, auth internal API
 │   └── course_contract.py      # AI-friendly course prompt JSON 계약
 └── utils.py
 tests/                          # unittest — course_contract, storage
@@ -54,24 +61,27 @@ requirements.txt
 
 ## ENDPOINTS
 
-`src/routers/` 의 라우트 정의가 canonical 이다 (총 14개, 전부 `/api/*`):
+`src/routers/` 의 라우트 정의가 canonical 이다 (전부 `/api/*`):
 
 | Router | Routes |
 |--------|--------|
-| `places.py` (`/api/places`) | `GET/POST /api/places`, `GET/PUT/DELETE /api/places/{place_id}`, `POST /api/places/resolve-google-link`, `POST /api/places/{place_id}/reviews` |
+| `session.py` (`/api/session`) | `POST /oidc/start`, `GET /oidc/callback`, `GET /me`, `POST /logout`, `POST /service-application` |
+| `places.py` (`/api/places`) | `GET/POST /api/places`, `GET/PUT/DELETE /api/places/{place_id}`, admin-only `POST /api/places/resolve-google-link`, `POST /api/places/{place_id}/reviews` |
 | `courses.py` (`/api/courses`) | `GET/POST /api/courses`, `GET/DELETE /api/courses/{course_id}`, `POST /api/courses/export`, `POST /api/courses/import` |
+| `friends.py` (`/api/friends`) | `GET /search`, `POST /requests`, `GET /requests/incoming`, `GET /requests/outgoing`, `POST /requests/{id}/accept`, `POST /requests/{id}/reject`, `GET /api/friends`, `DELETE /api/friends/{account_id}` |
 | `uploads.py` (`/api/uploads`) | `POST /api/uploads` |
 
 전용 health 엔드포인트는 없다 (Docker HEALTHCHECK 는 `GET /docs` 사용).
 
 ## DATABASE
 
-`src/connectors/__init__.py` `init_db()` 가 canonical — `travel_places`, `travel_place_reviews`, `travel_courses`, `travel_course_stops` 4개 테이블 (기본 DB 이름 `travelnote`).
+`src/connectors/__init__.py` `init_db()` 가 canonical — 기존 4개 travel 테이블에 owner/author/visibility 컬럼을 idempotent하게 추가하고 `travel_friend_requests`, `travel_friendships`를 생성한다. owner가 없는 legacy row는 auth internal account search의 정확한 `lafamila` account로 이관되며, 정확한 계정이 없으면 startup이 명확히 실패한다.
 
 ## DEPENDENCIES (requirements.txt)
 
 - `fastapi`, `uvicorn`, `pymysql`, `pydantic`, `python-dotenv` — todo-api-fastapi 와 같은 스택
 - `cryptography`
+- `python-jose` — RS256/JWKS access token 검증
 - `boto3` — S3 (운영) / LocalStack (로컬)
 - `python-multipart` — 파일 업로드
 - `playwright` — URL 미리보기 / 외부 페이지 스크래핑
@@ -89,6 +99,10 @@ docker run --rm --env-file .env -p 8010:8010 travel-api-fastapi
 ## ENVIRONMENT
 
 - `.env.example` 를 기준으로 env shape 를 맞춘다.
+- `AUTH_ISSUER_URL`, `AUTH_API_BASE_URL`, `AUTH_JWKS_URL`, `AUTH_AUDIENCE`, `AUTH_JWKS_CACHE_SECONDS`
+- `TRAVEL_ALLOWED_ORIGINS`, `TRAVEL_WEB_BASE_URL`, `TRAVEL_OIDC_*`, `TRAVEL_SESSION_COOKIE_*`, `TRAVEL_SESSION_MAX_AGE_SECONDS`
+- `AUTH_SERVICE_KEY_ID`, `AUTH_SERVICE_SECRET` — auth internal `account.search`, `permission.read` credential. legacy migration과 친구 검색, 신청 상태 확인에 필요.
+- `TRAVEL_LEGACY_OWNER_LOGIN_ID` — legacy row owner exact-match login id (기본 `lafamila`).
 - `DB_HOST` / `DB_PORT` / `DB_USER` / `DB_PASSWORD` / `DB_NAME` — shared root MySQL/MariaDB 또는 외부 운영 DB. 로컬 기본 DB 이름은 `travelnote`.
 - `S3_ENDPOINT_URL`, `S3_PUBLIC_BASE_URL`, `S3_BUCKET_NAME`, `S3_REGION`
 - `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_DEFAULT_REGION` — shared root LocalStack 또는 실제 S3
@@ -97,7 +111,7 @@ docker run --rm --env-file .env -p 8010:8010 travel-api-fastapi
 
 ## NOTES
 
-- todo-api-fastapi 와 같은 스택/패턴. 같은 종류 third-party infra 는 앱별 전용 컨테이너 대신 shared root infra 또는 외부 managed infra 를 우선 사용한다.
-- beer-house 쪽 `TRAVEL_API_BASE_URL` 같은 cross-repo 호출 계약은 유지되며, 이 레포 변경으로 env key/port contract 는 바뀌지 않는다.
+- todo-api-fastapi 의 OIDC session/JWKS 패턴을 travel `serviceKey`와 route에 맞춰 재사용한다. 같은 종류 third-party infra 는 앱별 전용 컨테이너 대신 shared root infra 또는 외부 managed infra 를 우선 사용한다.
+- travel web은 이 API를 same-origin `/api` 또는 local `http://localhost:8010/api`로 직접 호출하고 cookie 요청에 credentials를 포함해야 한다. beer-house BFF proxy 계약은 더 이상 사용하지 않는다.
 - `.idea/` 에 repo execution plan 이 들어올 수 있다. 새 계획도 `/idea-new` 후 `/idea-build` 로 이쪽 `.idea/` 에 누적된다.
 - 도메인 모델/엔드포인트가 잡히면 이 가이드에 ENDPOINTS 표를 추가하세요 (todo-api-fastapi/CLAUDE.md 참조).

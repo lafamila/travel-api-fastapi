@@ -1,13 +1,15 @@
 ---
-status: PREPARED
+status: COMPLETED
 summary: "travel-api를 auth-api OIDC session 기반 계정별 API로 전환하고 친구 공개 장소 공유를 구현한다."
+completed_at: 2026-07-20
+completion_reason: "OIDC 세션, 권한, 친구, 공개 장소 공유, lafamila legacy 이관을 구현하고 테스트했다."
 ---
 
 # TRAVEL WEB SPLIT — travel-api-fastapi execution plan
 
 Canonical orchestration plan:
 
-`../.idea/TRAVEL_WEB_SPLIT_PLAN.md`
+`../.idea/completed/TRAVEL_WEB_SPLIT_PLAN.md`
 
 ## Repo Responsibility
 `travel-api-fastapi`는 travel 데이터, auth session, 권한 검사, 친구 관계, 공개 장소 공유 규칙을 소유한다. `travel-web-next`는 이 API만 호출하고 beer-house BFF는 거치지 않는다.

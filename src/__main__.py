@@ -4,15 +4,21 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 try:
+    from .config import TRAVEL_ALLOWED_ORIGINS
     from .connectors import init_db
     from .routers.courses import router as courses_router
+    from .routers.friends import router as friends_router
     from .routers.places import router as places_router
+    from .routers.session import router as session_router
     from .routers.uploads import router as uploads_router
     from .services.storage import ensure_bucket
 except ImportError:  # pragma: no cover
+    from config import TRAVEL_ALLOWED_ORIGINS
     from connectors import init_db
     from routers.courses import router as courses_router
+    from routers.friends import router as friends_router
     from routers.places import router as places_router
+    from routers.session import router as session_router
     from routers.uploads import router as uploads_router
     from services.storage import ensure_bucket
 
@@ -42,7 +48,7 @@ app = FastAPI(title="Travel API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=TRAVEL_ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -51,6 +57,8 @@ app.add_middleware(
 app.include_router(places_router)
 app.include_router(courses_router)
 app.include_router(uploads_router)
+app.include_router(friends_router)
+app.include_router(session_router)
 
 
 if __name__ == "__main__":

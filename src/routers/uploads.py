@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, File, Form, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, UploadFile, status
 
+from ..auth_utils import get_current_user
 from ..services.storage import upload_image
 
 router = APIRouter(prefix="/api/uploads", tags=["uploads"])
@@ -11,7 +12,9 @@ router = APIRouter(prefix="/api/uploads", tags=["uploads"])
 async def upload_files(
     files: list[UploadFile] = File(...),
     folder: str = Form("travel"),
+    user: dict = Depends(get_current_user),
 ):
+    _ = user
     uploaded = []
     for file in files:
         uploaded.append(
