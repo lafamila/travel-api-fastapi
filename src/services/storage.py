@@ -4,6 +4,7 @@ import os
 import re
 import uuid
 import logging
+from pathlib import Path
 from typing import BinaryIO
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -84,6 +85,83 @@ def upload_image(file_obj: BinaryIO, filename: str, content_type: str, folder: s
         "contentType": content_type or "application/octet-stream",
         "filename": filename,
     }
+
+
+def upload_fileobj_to_key(
+    file_obj: BinaryIO,
+    key: str,
+    content_type: str = "application/octet-stream",
+) -> dict:
+    normalized_key = key.lstrip("/")
+    get_s3_client().upload_fileobj(
+        Fileobj=file_obj,
+        Bucket=S3_BUCKET_NAME,
+        Key=normalized_key,
+        ExtraArgs={"ContentType": content_type or "application/octet-stream"},
+    )
+    save_s3_state_after_upload()
+    return {
+        "key": normalized_key,
+        "url": public_object_url(normalized_key),
+        "contentType": content_type or "application/octet-stream",
+    }
+
+
+def upload_path_to_key(
+    path: Path, key: str, content_type: str = "application/octet-stream"
+) -> dict:
+    with path.open("rb") as file_obj:
+        return upload_fileobj_to_key(file_obj, key, content_type)
+
+
+def download_object_to_path(key: str, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    get_s3_client().download_file(S3_BUCKET_NAME, key, str(destination))
+
+
+def get_object(key: str):
+    return get_s3_client().get_object(Bucket=S3_BUCKET_NAME, Key=key)
+
+
+def copy_object(source_key: str, destination_key: str) -> dict:
+    normalized_key = destination_key.lstrip("/")
+    get_s3_client().copy_object(
+        Bucket=S3_BUCKET_NAME,
+        CopySource={"Bucket": S3_BUCKET_NAME, "Key": source_key},
+        Key=normalized_key,
+    )
+    save_s3_state_after_upload()
+    return {"key": normalized_key, "url": public_object_url(normalized_key)}
+
+
+def delete_object(key: str) -> None:
+    get_s3_client().delete_object(Bucket=S3_BUCKET_NAME, Key=key)
+
+
+def delete_prefix(prefix: str) -> int:
+    client = get_s3_client()
+    deleted = 0
+    continuation_token = None
+    while True:
+        arguments = {"Bucket": S3_BUCKET_NAME, "Prefix": prefix}
+        if continuation_token:
+            arguments["ContinuationToken"] = continuation_token
+        response = client.list_objects_v2(**arguments)
+        objects = [{"Key": item["Key"]} for item in response.get("Contents", [])]
+        if objects:
+            client.delete_objects(
+                Bucket=S3_BUCKET_NAME,
+                Delete={"Objects": objects, "Quiet": True},
+            )
+            deleted += len(objects)
+        if not response.get("IsTruncated"):
+            break
+        continuation_token = response.get("NextContinuationToken")
+    return deleted
+
+
+def public_object_url(key: str) -> str:
+    return f"{S3_PUBLIC_BASE_URL.rstrip('/')}/{S3_BUCKET_NAME}/{key.lstrip('/')}"
 
 
 def save_s3_state_after_upload() -> None:

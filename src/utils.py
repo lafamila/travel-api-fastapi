@@ -23,9 +23,12 @@ def dump_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def to_mysql_datetime(value: str | None) -> str | None:
+def to_mysql_datetime(value: str | datetime | None) -> str | None:
     if not value:
         return None
+
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
 
     normalized = value.strip()
     if normalized.endswith("Z"):

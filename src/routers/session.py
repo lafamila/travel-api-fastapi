@@ -41,6 +41,25 @@ async def create_service_application(request: Request, body: ServiceApplicationR
     return await get_session_service().create_service_application(request, body.message)
 
 
+@router.post("/session/import-access-application")
+async def create_import_access_application(
+    request: Request, body: ServiceApplicationRequest | None = None
+):
+    return await get_session_service().create_import_access_application(
+        request, body.message if body else None
+    )
+
+
+@router.get("/session/import-access-application")
+async def get_import_access_application_status(request: Request):
+    return await get_session_service().get_import_access_application_status(request)
+
+
+@router.post("/session/refresh")
+async def refresh_session(request: Request):
+    return await get_session_service().force_refresh(request)
+
+
 router.add_api_route(
     TRAVEL_OIDC_CALLBACK_ROUTE_PATH,
     session_oidc_callback,

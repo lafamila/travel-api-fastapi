@@ -62,8 +62,12 @@ class TravelPlaceCreateRequest(TravelPlaceBase):
     pass
 
 
-class ResolveGoogleMapsLinkRequest(BaseModel):
+class ResolveMapLinkRequest(BaseModel):
     url: str
+
+
+class ResolveGoogleMapsLinkRequest(ResolveMapLinkRequest):
+    pass
 
 
 class TravelPlaceUpdateRequest(BaseModel):
@@ -90,6 +94,19 @@ class TravelPlace(TravelPlaceBase):
     ownerLoginId: str
     ownerName: str
     ownerEmail: str | None = None
+
+
+class MapLinkResolution(BaseModel):
+    provider: Literal["google", "kakao", "naver"]
+    resolvedUrl: str
+    sourcePlaceId: str | None = None
+    name: str
+    address: str | None = None
+    latitude: float
+    longitude: float
+    openingHours: str | None = None
+    primaryType: str | None = None
+    coverImageUrl: str | None = None
 
 
 class GoogleMapsLinkResolution(BaseModel):

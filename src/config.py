@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
@@ -64,3 +65,43 @@ AUTH_SERVICE_SECRET = os.getenv("AUTH_SERVICE_SECRET", "").strip()
 TRAVEL_LEGACY_OWNER_LOGIN_ID = os.getenv(
     "TRAVEL_LEGACY_OWNER_LOGIN_ID", "lafamila"
 ).strip()
+TRAVEL_ENABLE_PLAYWRIGHT_FALLBACK = _get_bool(
+    "TRAVEL_ENABLE_PLAYWRIGHT_FALLBACK", False
+)
+
+# Photo import playground. Local imports are disabled unless both roots are set.
+TRAVEL_IMPORT_LOCAL_ROOT = os.getenv("TRAVEL_IMPORT_LOCAL_ROOT", "").strip()
+TRAVEL_IMPORT_OUTPUT_ROOT = os.getenv("TRAVEL_IMPORT_OUTPUT_ROOT", "").strip()
+TRAVEL_IMPORT_PUBLISH_ENABLED = _get_bool("TRAVEL_IMPORT_PUBLISH_ENABLED", False)
+TRAVEL_IMPORT_MAX_ZIP_FILES = int(os.getenv("TRAVEL_IMPORT_MAX_ZIP_FILES", "2000"))
+TRAVEL_IMPORT_MAX_ZIP_EXPANDED_BYTES = int(
+    os.getenv("TRAVEL_IMPORT_MAX_ZIP_EXPANDED_BYTES", str(10 * 1024**3))
+)
+TRAVEL_IMPORT_MAX_UPLOAD_BYTES = int(
+    os.getenv("TRAVEL_IMPORT_MAX_UPLOAD_BYTES", str(2 * 1024**3))
+)
+TRAVEL_IMPORT_JOB_STALE_SECONDS = int(
+    os.getenv("TRAVEL_IMPORT_JOB_STALE_SECONDS", "900")
+)
+TRAVEL_IMPORT_WORKER_POLL_SECONDS = float(
+    os.getenv("TRAVEL_IMPORT_WORKER_POLL_SECONDS", "2")
+)
+TRAVEL_IMPORT_NOMINATIM_BASE_URL = os.getenv(
+    "TRAVEL_IMPORT_NOMINATIM_BASE_URL", "https://nominatim.openstreetmap.org"
+).rstrip("/")
+TRAVEL_IMPORT_NOMINATIM_USER_AGENT = os.getenv(
+    "TRAVEL_IMPORT_NOMINATIM_USER_AGENT",
+    "teddy-travel-import/1.0 (https://map.lafamila.xyz)",
+).strip()
+
+
+def import_local_root() -> Path | None:
+    return Path(TRAVEL_IMPORT_LOCAL_ROOT).expanduser() if TRAVEL_IMPORT_LOCAL_ROOT else None
+
+
+def import_output_root() -> Path | None:
+    return (
+        Path(TRAVEL_IMPORT_OUTPUT_ROOT).expanduser()
+        if TRAVEL_IMPORT_OUTPUT_ROOT
+        else None
+    )

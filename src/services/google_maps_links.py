@@ -5,7 +5,6 @@ import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
-from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
 
@@ -24,34 +23,6 @@ class GoogleMapsLinkParseResult:
     longitude: float | None
 
 
-def resolve_google_maps_url(url: str) -> str:
-    import subprocess
-
-    # Use curl -L for reliable redirect following (urllib can fail in Docker)
-    try:
-        result = subprocess.run(
-            ["curl", "-s", "-L", "-o", "/dev/null", "-w", "%{url_effective}", url],
-            capture_output=True, text=True, timeout=15,
-        )
-        final_url = result.stdout.strip()
-        if final_url and final_url.startswith("http"):
-            return final_url
-    except Exception:
-        pass
-
-    # Fallback to urllib
-    request = Request(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36",
-        },
-    )
-    with urlopen(request, timeout=10) as response:
-        return response.geturl()
-
-
 def parse_google_maps_url(url: str) -> GoogleMapsLinkParseResult:
     parsed = urlparse(url)
     query = parse_qs(parsed.query)
@@ -65,12 +36,7 @@ def parse_google_maps_url(url: str) -> GoogleMapsLinkParseResult:
     if place_match:
         text_candidates.append(unquote(place_match.group(1)).replace("+", " "))
 
-    lat = None
-    lng = None
-    coords_match = re.search(r"@(-?\d+\.\d+),(-?\d+\.\d+)", url)
-    if coords_match:
-        lat = float(coords_match.group(1))
-        lng = float(coords_match.group(2))
+    lat, lng = _extract_coordinates(url, query)
 
     query_text = next((candidate for candidate in text_candidates if candidate), None)
 
@@ -80,6 +46,44 @@ def parse_google_maps_url(url: str) -> GoogleMapsLinkParseResult:
         latitude=lat,
         longitude=lng,
     )
+
+
+def _extract_coordinates(
+    url: str, query: dict[str, list[str]]
+) -> tuple[float | None, float | None]:
+    decoded_url = unquote(url)
+    coordinate_patterns = (
+        # Maps viewport/place URLs: /@37.123,127.456,17z
+        r"@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)",
+        # Place data URLs produced by maps.app.goo.gl redirects:
+        # /data=...!3d37.123!4d127.456...
+        r"!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)",
+    )
+    for pattern in coordinate_patterns:
+        match = re.search(pattern, decoded_url)
+        if match:
+            coordinates = (float(match.group(1)), float(match.group(2)))
+            if _coordinates_are_valid(*coordinates):
+                return coordinates
+
+    for key in ("ll", "center"):
+        values = query.get(key)
+        if not values:
+            continue
+        match = re.fullmatch(
+            r"\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*",
+            values[0],
+        )
+        if match:
+            coordinates = (float(match.group(1)), float(match.group(2)))
+            if _coordinates_are_valid(*coordinates):
+                return coordinates
+
+    return None, None
+
+
+def _coordinates_are_valid(latitude: float, longitude: float) -> bool:
+    return -90 <= latitude <= 90 and -180 <= longitude <= 180
 
 
 async def crawl_google_maps_place(

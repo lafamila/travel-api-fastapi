@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -9,7 +8,9 @@ from ..auth_utils import get_current_user, require_admin
 from ..connectors import get_db_connection
 from ..schemas import (
     GoogleMapsLinkResolution,
+    MapLinkResolution,
     ResolveGoogleMapsLinkRequest,
+    ResolveMapLinkRequest,
     TravelPlace,
     TravelPlaceCreateRequest,
     TravelPlaceUpdateRequest,
@@ -22,10 +23,11 @@ from ..services.authorization import (
     can_review_place,
     can_view_place,
 )
-from ..services.google_maps_links import (
-    crawl_google_maps_place,
-    parse_google_maps_url,
-    resolve_google_maps_url,
+from ..services.place_links import (
+    PlaceLinkError,
+    PlaceLinkResult,
+    detect_map_provider,
+    resolve_place_link as resolve_supported_place_link,
 )
 from ..utils import dump_json, generate_id, parse_json_list, to_mysql_datetime
 
@@ -193,6 +195,42 @@ async def create_place(
             return _map_place(cursor.fetchone())
 
 
+async def _resolve_place_link(data_url: str, request: Request) -> PlaceLinkResult:
+    try:
+        return await resolve_supported_place_link(
+            data_url,
+            browser=getattr(request.app.state, "browser", None),
+        )
+    except PlaceLinkError as error:
+        logger.warning("resolve-map-link failed: %s", error)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to resolve map link: {error}",
+        ) from error
+
+
+@router.post("/resolve-map-link", response_model=MapLinkResolution)
+async def resolve_map_link(
+    data: ResolveMapLinkRequest,
+    request: Request,
+    user: dict = Depends(require_admin),
+):
+    _ = user
+    result = await _resolve_place_link(data.url, request)
+    return MapLinkResolution(
+        provider=result.provider,
+        resolvedUrl=result.resolved_url,
+        sourcePlaceId=result.source_place_id,
+        name=result.name,
+        address=result.address,
+        latitude=result.latitude,
+        longitude=result.longitude,
+        openingHours=result.opening_hours,
+        primaryType=result.primary_type,
+        coverImageUrl=result.cover_image_url,
+    )
+
+
 @router.post("/resolve-google-link", response_model=GoogleMapsLinkResolution)
 async def resolve_google_link(
     data: ResolveGoogleMapsLinkRequest,
@@ -201,48 +239,25 @@ async def resolve_google_link(
 ):
     _ = user
     try:
-        resolved_url = await asyncio.to_thread(resolve_google_maps_url, data.url)
-        parsed = parse_google_maps_url(resolved_url)
-    except Exception as error:
-        logger.warning("resolve-google-link failed: %s", error)
+        provider = detect_map_provider(data.url)
+    except PlaceLinkError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if provider != "google":
         raise HTTPException(
             status_code=400,
-            detail=f"Failed to resolve Google Maps link: {error}",
-        ) from error
-    if parsed.latitude is None or parsed.longitude is None:
-        if not parsed.query_text:
-            raise HTTPException(
-                status_code=400,
-                detail="Could not extract coordinates or place name from the Google Maps link",
-            )
-    crawled = None
-    browser = getattr(request.app.state, "browser", None)
-    if browser:
-        crawled = await crawl_google_maps_place(
-            browser,
-            resolved_url,
-            parsed.query_text,
-            parsed.latitude,
-            parsed.longitude,
+            detail="This compatibility endpoint accepts Google Maps links only",
         )
-    final_name = (crawled or {}).get("name") or parsed.query_text or "Unknown Place"
-    final_lat = (crawled or {}).get("latitude") or parsed.latitude
-    final_lng = (crawled or {}).get("longitude") or parsed.longitude
-    if final_lat is None or final_lng is None:
-        raise HTTPException(
-            status_code=400,
-            detail="Could not extract coordinates from the Google Maps link",
-        )
+    result = await _resolve_place_link(data.url, request)
     return GoogleMapsLinkResolution(
-        resolvedUrl=resolved_url,
-        googlePlaceId=None,
-        googleMapsUri=None,
-        name=final_name,
-        address=(crawled or {}).get("address"),
-        latitude=final_lat,
-        longitude=final_lng,
-        openingHours=(crawled or {}).get("openingHours"),
-        primaryType=(crawled or {}).get("primaryType"),
+        resolvedUrl=result.resolved_url,
+        googlePlaceId=result.source_place_id,
+        googleMapsUri=result.resolved_url,
+        name=result.name,
+        address=result.address,
+        latitude=result.latitude,
+        longitude=result.longitude,
+        openingHours=result.opening_hours,
+        primaryType=result.primary_type,
     )
 
 

@@ -137,6 +137,13 @@ class TravelSessionService:
             )
         return result
 
+    async def force_refresh(self, request_obj: Request) -> dict:
+        session = self._get_request_session(request_obj)
+        if session is None:
+            raise HTTPException(status_code=401, detail="Travel session is required")
+        await asyncio.to_thread(self._refresh_session_sync, session.id, True)
+        return await self.get_user(request_obj)
+
     async def require_valid_session(self, request_obj: Request) -> TravelSession:
         session = self._get_request_session(request_obj)
         if session is None:
@@ -155,11 +162,40 @@ class TravelSessionService:
     async def create_service_application(
         self, request_obj: Request, message: str | None
     ) -> Any:
+        return await self._create_permission_application(
+            request_obj,
+            requested_permission_key="user",
+            message=message,
+            default_message="travel 서비스를 사용하기 위해 user 권한 상승을 요청합니다.",
+        )
+
+    async def create_import_access_application(
+        self, request_obj: Request, message: str | None = None
+    ) -> Any:
+        return await self._create_permission_application(
+            request_obj,
+            requested_permission_key="admin",
+            message=message,
+            default_message="여행 사진 가져오기 기능을 사용하기 위해 관리자 권한을 요청합니다.",
+        )
+
+    async def get_import_access_application_status(self, request_obj: Request) -> Any:
+        session = await self.require_valid_session(request_obj)
+        return await self.get_application_status(session.user["account_id"])
+
+    async def _create_permission_application(
+        self,
+        request_obj: Request,
+        *,
+        requested_permission_key: str,
+        message: str | None,
+        default_message: str,
+    ) -> Any:
         session = await self.require_valid_session(request_obj)
         request_message = (
             message.strip()
             if isinstance(message, str) and message.strip()
-            else "travel 서비스를 사용하기 위해 user 권한 상승을 요청합니다."
+            else default_message
         )
         response = await asyncio.to_thread(
             self._request_json,
@@ -168,7 +204,7 @@ class TravelSessionService:
             {
                 "serviceKey": "travel",
                 "message": request_message,
-                "requestedPermissionKey": "user",
+                "requestedPermissionKey": requested_permission_key,
             },
             {"Authorization": f"Bearer {session.access_token}"},
         )
@@ -335,17 +371,22 @@ class TravelSessionService:
         return data
 
     def _refresh_if_needed_sync(self, session_id: str) -> TravelSession:
+        return self._refresh_session_sync(session_id, False)
+
+    def _refresh_session_sync(
+        self, session_id: str, force: bool = False
+    ) -> TravelSession:
         session = self._get_session_by_id(session_id)
         if session is None:
             raise HTTPException(status_code=401, detail="Travel session is required")
-        if session.access_token_expires_at - time() <= 30:
+        if force or session.access_token_expires_at - time() <= 30:
             with session.refresh_lock:
                 session = self._get_session_by_id(session_id)
                 if session is None:
                     raise HTTPException(
                         status_code=401, detail="Travel session is required"
                     )
-                if session.access_token_expires_at - time() > 30:
+                if not force and session.access_token_expires_at - time() > 30:
                     return session
                 refresh_token = session.refresh_token
                 refresh_lock = session.refresh_lock

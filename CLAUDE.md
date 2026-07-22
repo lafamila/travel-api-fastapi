@@ -1,6 +1,6 @@
 # travel-api-fastapi
 
-FastAPI backend for travel places/courses — stores user-tagged map markers, generates AI-friendly course prompt JSON, integrates with S3 (media) and Playwright (URL preview/scraping).
+FastAPI backend for travel places/courses — stores user-tagged map markers, generates AI-friendly course prompt JSON, integrates with S3 media and static Google/Kakao/Naver place-link parsing.
 
 > 이 파일이 본 레포의 canonical 가이드입니다. `AGENTS.md` 는 codex 호환용 stub 입니다.
 
@@ -35,24 +35,30 @@ routers/services/schemas 멀티모듈 구조다 (초기의 single-file 패턴에
 
 ```
 src/
-├── __main__.py                 # FastAPI app 생성(lifespan: init_db + ensure_bucket + Playwright browser), 라우터 등록
+├── __main__.py                 # FastAPI app 생성(lifespan: init_db + ensure_bucket + optional Playwright), 라우터 등록
 ├── config.py                   # auth/session/CORS env 계약
 ├── token_verifier.py           # auth JWKS cache + issuer/audience/service claim 검증
 ├── auth_utils.py               # cookie/bearer current user, visitor/admin dependency
 ├── connectors/__init__.py      # MySQL DDL, idempotent ownership migration
 ├── routers/
-│   ├── places.py               # /api/places — CRUD, 리뷰, resolve-google-link
+│   ├── places.py               # /api/places — CRUD, 리뷰, resolve-map-link
 │   ├── courses.py              # /api/courses — CRUD, export/import
 │   ├── friends.py              # /api/friends — 검색/요청/수락/거절/삭제
+│   ├── imports.py              # /api/imports — 사진 import batch/draft/publish API
 │   ├── session.py              # /api/session — OIDC/session/access application
 │   └── uploads.py              # /api/uploads — S3 미디어 업로드
 ├── schemas.py                  # Pydantic request/response 모델
 ├── services/
 │   ├── storage.py              # S3/LocalStack 클라이언트, ensure_bucket, presign
-│   ├── google_maps_links.py    # Google Maps 링크 해석 (Playwright)
+│   ├── place_links.py          # Google/Kakao/Naver 정적 링크 해석
+│   ├── google_maps_links.py    # Google URL 파싱 + optional Playwright 보강
 │   ├── authorization.py        # 장소/코스 owner/friend/superadmin 규칙
 │   ├── session_auth.py         # PKCE OIDC, in-memory refresh/session, auth internal API
+│   ├── import_contract.py      # ZIP/local safety, EXIF normalization, clustering, manifest
+│   ├── import_processor.py     # ExifTool/geocode/organize worker pipeline
+│   ├── import_repository.py    # import batch/job persistence and atomic claims
 │   └── course_contract.py      # AI-friendly course prompt JSON 계약
+├── import_worker.py            # `python -m src.import_worker` 별도 worker entrypoint
 └── utils.py
 tests/                          # unittest — course_contract, storage
 Dockerfile                      # Playwright Chromium 포함, HEALTHCHECK 포함
@@ -66,16 +72,17 @@ requirements.txt
 | Router | Routes |
 |--------|--------|
 | `session.py` (`/api/session`) | `POST /oidc/start`, `GET /oidc/callback`, `GET /me`, `POST /logout`, `POST /service-application` |
-| `places.py` (`/api/places`) | `GET/POST /api/places`, `GET/PUT/DELETE /api/places/{place_id}`, admin-only `POST /api/places/resolve-google-link`, `POST /api/places/{place_id}/reviews` |
+| `places.py` (`/api/places`) | `GET/POST /api/places`, `GET/PUT/DELETE /api/places/{place_id}`, admin-only `POST /api/places/resolve-map-link`, compatibility `POST /api/places/resolve-google-link`, `POST /api/places/{place_id}/reviews` |
 | `courses.py` (`/api/courses`) | `GET/POST /api/courses`, `GET/DELETE /api/courses/{course_id}`, `POST /api/courses/export`, `POST /api/courses/import` |
 | `friends.py` (`/api/friends`) | `GET /search`, `POST /requests`, `GET /requests/incoming`, `GET /requests/outgoing`, `POST /requests/{id}/accept`, `POST /requests/{id}/reject`, `GET /api/friends`, `DELETE /api/friends/{account_id}` |
 | `uploads.py` (`/api/uploads`) | `POST /api/uploads` |
+| `imports.py` (`/api/imports`) | admin-only batch CRUD, files/process, asset preview/draft, cluster merge/split/draft, manifest/validate/publish |
 
 전용 health 엔드포인트는 없다 (Docker HEALTHCHECK 는 `GET /docs` 사용).
 
 ## DATABASE
 
-`src/connectors/__init__.py` `init_db()` 가 canonical — 기존 4개 travel 테이블에 owner/author/visibility 컬럼을 idempotent하게 추가하고 `travel_friend_requests`, `travel_friendships`를 생성한다. owner가 없는 legacy row는 auth internal account search의 정확한 `lafamila` account로 이관되며, 정확한 계정이 없으면 startup이 명확히 실패한다.
+`src/connectors/__init__.py` `init_db()` 가 canonical — 기존 travel 테이블과 함께 `travel_import_batches`, `travel_import_assets`, `travel_import_clusters`, `travel_import_review_drafts`, `travel_import_geocode_cache`, `travel_import_jobs`를 idempotent하게 생성한다. owner가 없는 legacy row는 auth internal account search의 정확한 `lafamila` account로 이관되며, 정확한 계정이 없으면 startup이 명확히 실패한다.
 
 ## DEPENDENCIES (requirements.txt)
 
@@ -84,7 +91,7 @@ requirements.txt
 - `python-jose` — RS256/JWKS access token 검증
 - `boto3` — S3 (운영) / LocalStack (로컬)
 - `python-multipart` — 파일 업로드
-- `playwright` — URL 미리보기 / 외부 페이지 스크래핑
+- `playwright` — `TRAVEL_ENABLE_PLAYWRIGHT_FALLBACK=true`일 때 Google 보조 필드 보강
 
 ## COMMANDS
 
@@ -94,6 +101,7 @@ uvicorn src.__main__:app --port 8010
 docker build -t travel-api-fastapi .
 # deploy/run example
 docker run --rm --env-file .env -p 8010:8010 travel-api-fastapi
+docker run --rm --env-file .env travel-api-fastapi python -m src.import_worker
 ```
 
 ## ENVIRONMENT
@@ -107,6 +115,10 @@ docker run --rm --env-file .env -p 8010:8010 travel-api-fastapi
 - `S3_ENDPOINT_URL`, `S3_PUBLIC_BASE_URL`, `S3_BUCKET_NAME`, `S3_REGION`
 - `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_DEFAULT_REGION` — shared root LocalStack 또는 실제 S3
 - `LOCALSTACK_STATE_URL`, `S3_SAVE_STATE_AFTER_UPLOAD`, `S3_STATE_SAVE_STRICT` — LocalStack state save 를 쓸 때만 설정
+- `TRAVEL_IMPORT_LOCAL_ROOT`, `TRAVEL_IMPORT_OUTPUT_ROOT` — 둘 다 설정할 때만 상대경로 local import 활성화
+- `TRAVEL_IMPORT_MAX_UPLOAD_BYTES`, `TRAVEL_IMPORT_MAX_ZIP_FILES`, `TRAVEL_IMPORT_MAX_ZIP_EXPANDED_BYTES` — upload/ZIP 안전 제한
+- `TRAVEL_IMPORT_NOMINATIM_BASE_URL`, `TRAVEL_IMPORT_NOMINATIM_USER_AGENT` — reverse geocode 계약
+- `TRAVEL_IMPORT_PUBLISH_ENABLED` — 운영 publish gate (기본 false)
 - 로컬에서는 shared root infra 의 MySQL/MariaDB + LocalStack 을 재사용하고, 독립 배포 시에는 해당 값을 운영 DB/S3 endpoint 로 교체한다.
 
 ## NOTES

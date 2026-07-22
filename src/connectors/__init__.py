@@ -56,7 +56,9 @@ def init_db(
             )
             cursor.execute(f"USE {database}")
             _create_tables(cursor)
+            _create_import_tables(cursor)
             _extend_existing_tables(cursor)
+            _extend_import_tables(cursor)
             cursor.execute(
                 "UPDATE travel_places SET visibility = 'public' "
                 "WHERE visibility IS NULL OR visibility = ''"
@@ -305,6 +307,157 @@ def _extend_existing_tables(cursor) -> None:
     _ensure_index(cursor, "travel_courses", "idx_course_owner", "owner_account_id")
 
 
+def _create_import_tables(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS travel_import_batches (
+            id VARCHAR(50) PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
+            source_type VARCHAR(20) NOT NULL,
+            source_path VARCHAR(1000) NULL,
+            status VARCHAR(30) NOT NULL DEFAULT 'draft',
+            progress_current INT NOT NULL DEFAULT 0,
+            progress_total INT NOT NULL DEFAULT 0,
+            error_text TEXT NULL,
+            oldest_captured_at DATETIME NULL,
+            manifest_version VARCHAR(50) NOT NULL DEFAULT 'travel-import.v1',
+            manifest_json LONGTEXT NULL,
+            owner_account_id VARCHAR(64) NOT NULL,
+            owner_login_id VARCHAR(255) NOT NULL,
+            owner_name VARCHAR(255) NOT NULL,
+            owner_email VARCHAR(320) NULL,
+            published_at DATETIME NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            INDEX idx_import_batch_owner_created (owner_account_id, created_at),
+            INDEX idx_import_batch_status (status, updated_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS travel_import_clusters (
+            id VARCHAR(50) PRIMARY KEY,
+            batch_id VARCHAR(50) NOT NULL,
+            sort_order INT NOT NULL DEFAULT 0,
+            representative_asset_id VARCHAR(50) NULL,
+            latitude DOUBLE NOT NULL,
+            longitude DOUBLE NOT NULL,
+            country_code VARCHAR(10) NULL,
+            country VARCHAR(255) NULL,
+            city VARCHAR(255) NULL,
+            address VARCHAR(1000) NULL,
+            suggested_name VARCHAR(255) NULL,
+            draft_name VARCHAR(255) NULL,
+            draft_category VARCHAR(50) NULL,
+            draft_address VARCHAR(1000) NULL,
+            draft_description TEXT NULL,
+            draft_visibility VARCHAR(20) NULL DEFAULT 'public',
+            map_link VARCHAR(2000) NULL,
+            publish_action VARCHAR(20) NOT NULL DEFAULT 'create',
+            existing_place_id VARCHAR(50) NULL,
+            published_place_id VARCHAR(50) NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            FOREIGN KEY (batch_id) REFERENCES travel_import_batches(id) ON DELETE CASCADE,
+            INDEX idx_import_cluster_batch (batch_id, sort_order)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS travel_import_assets (
+            id VARCHAR(50) PRIMARY KEY,
+            batch_id VARCHAR(50) NOT NULL,
+            cluster_id VARCHAR(50) NULL,
+            source_ref VARCHAR(255) NOT NULL,
+            original_name VARCHAR(500) NOT NULL,
+            media_type VARCHAR(100) NULL,
+            byte_size BIGINT NULL,
+            storage_kind VARCHAR(20) NOT NULL,
+            staging_key VARCHAR(1500) NULL,
+            local_source_path VARCHAR(1500) NULL,
+            organized_path VARCHAR(1500) NULL,
+            preview_key VARCHAR(1500) NULL,
+            thumbnail_key VARCHAR(1500) NULL,
+            sha256 CHAR(64) NULL,
+            captured_at DATETIME NULL,
+            latitude DOUBLE NULL,
+            longitude DOUBLE NULL,
+            metadata_json LONGTEXT NULL,
+            classification VARCHAR(40) NOT NULL DEFAULT 'pending',
+            classification_reason VARCHAR(255) NULL,
+            manual_exclusion_reason VARCHAR(40) NULL,
+            role VARCHAR(20) NOT NULL DEFAULT 'gallery',
+            excluded TINYINT(1) NOT NULL DEFAULT 0,
+            duplicate_of_asset_id VARCHAR(50) NULL,
+            processed_at DATETIME NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            FOREIGN KEY (batch_id) REFERENCES travel_import_batches(id) ON DELETE CASCADE,
+            UNIQUE KEY uq_import_asset_source (batch_id, source_ref),
+            INDEX idx_import_asset_batch_cluster (batch_id, cluster_id),
+            INDEX idx_import_asset_batch_sha (batch_id, sha256),
+            INDEX idx_import_asset_role (batch_id, role)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS travel_import_review_drafts (
+            id VARCHAR(50) PRIMARY KEY,
+            batch_id VARCHAR(50) NOT NULL,
+            asset_id VARCHAR(50) NOT NULL,
+            rating INT NULL,
+            headline VARCHAR(255) NULL,
+            body TEXT NULL,
+            visited_at DATETIME NULL,
+            published_review_id VARCHAR(50) NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            FOREIGN KEY (batch_id) REFERENCES travel_import_batches(id) ON DELETE CASCADE,
+            FOREIGN KEY (asset_id) REFERENCES travel_import_assets(id) ON DELETE CASCADE,
+            UNIQUE KEY uq_import_review_asset (asset_id),
+            INDEX idx_import_review_batch (batch_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS travel_import_geocode_cache (
+            cache_key VARCHAR(100) PRIMARY KEY,
+            latitude DOUBLE NOT NULL,
+            longitude DOUBLE NOT NULL,
+            response_json LONGTEXT NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS travel_import_jobs (
+            id VARCHAR(50) PRIMARY KEY,
+            batch_id VARCHAR(50) NOT NULL,
+            job_type VARCHAR(30) NOT NULL DEFAULT 'process',
+            status VARCHAR(20) NOT NULL DEFAULT 'queued',
+            progress_current INT NOT NULL DEFAULT 0,
+            progress_total INT NOT NULL DEFAULT 0,
+            attempts INT NOT NULL DEFAULT 0,
+            worker_id VARCHAR(255) NULL,
+            error_text TEXT NULL,
+            claimed_at DATETIME NULL,
+            heartbeat_at DATETIME NULL,
+            completed_at DATETIME NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            FOREIGN KEY (batch_id) REFERENCES travel_import_batches(id) ON DELETE CASCADE,
+            INDEX idx_import_job_claim (status, created_at),
+            INDEX idx_import_job_batch (batch_id, created_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """
+    )
+
+
 def _ensure_column(cursor, table: str, column: str, definition: str) -> None:
     cursor.execute(
         """
@@ -319,6 +472,31 @@ def _ensure_column(cursor, table: str, column: str, definition: str) -> None:
             f"ALTER TABLE {_quote_identifier(table)} "
             f"ADD COLUMN {_quote_identifier(column)} {definition}"
         )
+
+
+def _extend_import_tables(cursor) -> None:
+    _ensure_column(
+        cursor,
+        "travel_import_assets",
+        "thumbnail_key",
+        "VARCHAR(1500) NULL",
+    )
+    _ensure_column(
+        cursor,
+        "travel_import_assets",
+        "manual_exclusion_reason",
+        "VARCHAR(40) NULL",
+    )
+    _ensure_column(
+        cursor,
+        "travel_import_clusters",
+        "map_link",
+        "VARCHAR(2000) NULL",
+    )
+    cursor.execute(
+        "UPDATE travel_import_clusters SET draft_visibility = 'public' "
+        "WHERE draft_visibility IS NULL OR draft_visibility = ''"
+    )
 
 
 def _ensure_index(cursor, table: str, index: str, columns: str) -> None:

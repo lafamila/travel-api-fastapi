@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from urllib.parse import parse_qs, urlsplit
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from jose import JWTError
 
 from src import token_verifier
@@ -108,6 +108,88 @@ class TravelSessionServiceOidcTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.service._get_session_by_id("expired"))
         self.assertNotIn("expired", self.service._sessions)
 
+    async def test_import_access_application_requests_admin_with_korean_message(self) -> None:
+        self.service._sessions["session-1"] = session_auth.TravelSession(
+            id="session-1",
+            access_token="access-token",
+            refresh_token="refresh-token",
+            access_token_expires_at=9999999999,
+            session_expires_at=9999999999,
+            user={"id": "account-1", "account_id": "account-1"},
+        )
+        captured = {}
+
+        def fake_request(method, url, body, headers):
+            captured.update({"method": method, "url": url, "body": body, "headers": headers})
+            return session_auth._HttpResponse(201, {}, {"id": "application-1"})
+
+        self.service._request_json = fake_request
+        result = await self.service.create_import_access_application(
+            _request_with_cookie("teddy_travel_session", "session-1")
+        )
+
+        self.assertEqual(result, {"id": "application-1"})
+        self.assertEqual(captured["body"]["requestedPermissionKey"], "admin")
+        self.assertIn("관리자 권한", captured["body"]["message"])
+
+    async def test_existing_service_application_still_requests_user(self) -> None:
+        self.service._sessions["session-1"] = session_auth.TravelSession(
+            id="session-1",
+            access_token="access-token",
+            refresh_token="refresh-token",
+            access_token_expires_at=9999999999,
+            session_expires_at=9999999999,
+            user={"id": "account-1", "account_id": "account-1"},
+        )
+        captured = {}
+        self.service._request_json = lambda method, url, body, headers: (
+            captured.update(body) or session_auth._HttpResponse(201, {}, body)
+        )
+        await self.service.create_service_application(
+            _request_with_cookie("teddy_travel_session", "session-1"), None
+        )
+        self.assertEqual(captured["requestedPermissionKey"], "user")
+
+    async def test_force_refresh_rotates_even_unexpired_access_token(self) -> None:
+        original = session_auth.TravelSession(
+            id="session-1",
+            access_token="old-access",
+            refresh_token="old-refresh",
+            access_token_expires_at=9999999999,
+            session_expires_at=9999999999,
+            user={"id": "account-1", "account_id": "account-1"},
+        )
+        self.service._sessions[original.id] = original
+        requests = []
+        self.service._request_token = lambda body: requests.append(body) or {
+            "access_token": "new-access",
+            "refresh_token": "new-refresh",
+            "expires_in": 3600,
+        }
+        self.service._create_session = lambda token, session_id, refresh_lock: (
+            session_auth.TravelSession(
+                id=session_id,
+                access_token=token["access_token"],
+                refresh_token=token["refresh_token"],
+                access_token_expires_at=9999999999,
+                session_expires_at=9999999999,
+                user={"id": "account-1", "account_id": "account-1", "permission": "admin"},
+                refresh_lock=refresh_lock,
+            )
+        )
+
+        async def fake_get_user(_request):
+            return {"permission": self.service._sessions["session-1"].user["permission"]}
+
+        self.service.get_user = fake_get_user
+        result = await self.service.force_refresh(
+            _request_with_cookie("teddy_travel_session", "session-1")
+        )
+
+        self.assertEqual(result["permission"], "admin")
+        self.assertEqual(requests[0]["grant_type"], "refresh_token")
+        self.assertEqual(self.service._sessions["session-1"].access_token, "new-access")
+
 
 class TravelTokenVerifierTests(unittest.TestCase):
     def test_builds_travel_superadmin(self) -> None:
@@ -150,6 +232,21 @@ class TravelPermissionDependencyTests(unittest.IsolatedAsyncioTestCase):
         for permission in ("admin", "superadmin"):
             user = {"permission": permission}
             self.assertIs(await require_admin(user), user)
+
+
+def _request_with_cookie(name: str, value: str) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/",
+            "headers": [(b"cookie", f"{name}={value}".encode())],
+            "query_string": b"",
+            "server": ("testserver", 80),
+            "client": ("testclient", 50000),
+            "scheme": "http",
+        }
+    )
 
 
 if __name__ == "__main__":
