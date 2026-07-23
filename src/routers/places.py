@@ -23,12 +23,18 @@ from ..services.authorization import (
     can_review_place,
     can_view_place,
 )
+from ..services.media import (
+    attach_media,
+    cleanup_unreferenced_media,
+    resolve_media_urls,
+)
 from ..services.place_links import (
     PlaceLinkError,
     PlaceLinkResult,
     detect_map_provider,
     resolve_place_link as resolve_supported_place_link,
 )
+from ..services.storage import is_managed_object_url
 from ..utils import dump_json, generate_id, parse_json_list, to_mysql_datetime
 
 router = APIRouter(prefix="/api/places", tags=["places"])
@@ -36,18 +42,30 @@ logger = logging.getLogger(__name__)
 
 PLACE_COLUMNS = """
     id, name, category, latitude, longitude, address, description,
-    opening_hours, special_notes, cover_image_url, photo_urls_json, tags_json,
+    opening_hours, special_notes, cover_image_url, photo_urls_json,
+    cover_media_id, photo_media_ids_json, tags_json,
     owner_account_id, owner_login_id, owner_name, owner_email, visibility,
     created_at, updated_at
 """
 REVIEW_COLUMNS = """
     id, place_id, rating, headline, body, visited_at, photo_urls_json,
+    photo_media_ids_json,
     author_account_id, author_login_id, author_name, author_email,
     created_at, updated_at
 """
 
 
-def _map_review(row: dict) -> TravelReview:
+def _validate_external_urls(urls: list[str | None]) -> None:
+    if any(is_managed_object_url(url) for url in urls):
+        raise HTTPException(
+            status_code=400,
+            detail="Managed uploads must be referenced by media ID, not by access URL",
+        )
+
+
+def _map_review(row: dict, cursor) -> TravelReview:
+    media_ids = parse_json_list(row.get("photo_media_ids_json"))
+    external_photo_urls = parse_json_list(row.get("photo_urls_json"))
     return TravelReview(
         id=row["id"],
         placeId=row["place_id"],
@@ -55,7 +73,11 @@ def _map_review(row: dict) -> TravelReview:
         headline=row["headline"],
         body=row["body"],
         visitedAt=row["visited_at"].isoformat() if row["visited_at"] else None,
-        photoUrls=parse_json_list(row.get("photo_urls_json")),
+        photoUrls=(
+            resolve_media_urls(cursor, media_ids) + external_photo_urls
+        ),
+        photoMediaIds=media_ids,
+        externalPhotoUrls=external_photo_urls,
         createdAt=row["created_at"].isoformat(),
         updatedAt=row["updated_at"].isoformat(),
         authorAccountId=row["author_account_id"],
@@ -65,7 +87,15 @@ def _map_review(row: dict) -> TravelReview:
     )
 
 
-def _map_place(row: dict, reviews: list[TravelReview] | None = None) -> TravelPlace:
+def _map_place(
+    row: dict, cursor, reviews: list[TravelReview] | None = None
+) -> TravelPlace:
+    cover_media_id = row.get("cover_media_id")
+    photo_media_ids = parse_json_list(row.get("photo_media_ids_json"))
+    external_photo_urls = parse_json_list(row.get("photo_urls_json"))
+    cover_media_urls = (
+        resolve_media_urls(cursor, [cover_media_id]) if cover_media_id else []
+    )
     return TravelPlace(
         id=row["id"],
         name=row["name"],
@@ -76,14 +106,20 @@ def _map_place(row: dict, reviews: list[TravelReview] | None = None) -> TravelPl
         description=row["description"],
         openingHours=row["opening_hours"],
         specialNotes=row["special_notes"],
-        coverImageUrl=row["cover_image_url"],
-        photoUrls=parse_json_list(row.get("photo_urls_json")),
+        coverImageUrl=cover_media_urls[0] if cover_media_urls else row["cover_image_url"],
+        photoUrls=(
+            resolve_media_urls(cursor, photo_media_ids) + external_photo_urls
+        ),
+        coverMediaId=cover_media_id,
+        photoMediaIds=photo_media_ids,
         tags=parse_json_list(row.get("tags_json")),
         visibility=row["visibility"],
         ownerAccountId=row["owner_account_id"],
         ownerLoginId=row["owner_login_id"],
         ownerName=row["owner_name"],
         ownerEmail=row.get("owner_email"),
+        externalCoverImageUrl=row["cover_image_url"],
+        externalPhotoUrls=external_photo_urls,
         createdAt=row["created_at"].isoformat(),
         updatedAt=row["updated_at"].isoformat(),
         reviews=reviews or [],
@@ -147,7 +183,7 @@ async def get_places(
                 """,
                 values,
             )
-            return [_map_place(row) for row in cursor.fetchall()]
+            return [_map_place(row, cursor) for row in cursor.fetchall()]
 
 
 @router.post("", response_model=TravelPlace, status_code=status.HTTP_201_CREATED)
@@ -155,18 +191,24 @@ async def create_place(
     data: TravelPlaceCreateRequest,
     user: dict = Depends(get_current_user),
 ):
+    _validate_external_urls([data.coverImageUrl, *data.photoUrls])
     place_id = generate_id("place")
     with get_db_connection() as connection:
         with connection.cursor() as cursor:
+            photo_media_ids = attach_media(cursor, data.photoMediaIds, user)
+            cover_media_id = data.coverMediaId
+            if cover_media_id:
+                attach_media(cursor, [cover_media_id], user)
             cursor.execute(
                 """
                 INSERT INTO travel_places (
                     id, name, category, latitude, longitude, address, description,
                     opening_hours, special_notes, cover_image_url,
-                    photo_urls_json, tags_json, visibility,
+                    photo_urls_json, cover_media_id, photo_media_ids_json,
+                    tags_json, visibility,
                     owner_account_id, owner_login_id, owner_name, owner_email
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                          %s, %s, %s, %s, %s, %s, %s)
+                          %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     place_id,
@@ -180,6 +222,8 @@ async def create_place(
                     data.specialNotes,
                     data.coverImageUrl,
                     dump_json(data.photoUrls),
+                    cover_media_id,
+                    dump_json(photo_media_ids),
                     dump_json(data.tags),
                     data.visibility,
                     user["account_id"],
@@ -192,7 +236,7 @@ async def create_place(
                 f"SELECT {PLACE_COLUMNS} FROM travel_places WHERE id = %s",
                 (place_id,),
             )
-            return _map_place(cursor.fetchone())
+            return _map_place(cursor.fetchone(), cursor)
 
 
 async def _resolve_place_link(data_url: str, request: Request) -> PlaceLinkResult:
@@ -278,8 +322,8 @@ async def get_place(
                 """,
                 (place_id,),
             )
-            reviews = [_map_review(review) for review in cursor.fetchall()]
-            return _map_place(row, reviews)
+            reviews = [_map_review(review, cursor) for review in cursor.fetchall()]
+            return _map_place(row, cursor, reviews)
 
 
 @router.put("/{place_id}", response_model=TravelPlace)
@@ -288,9 +332,15 @@ async def update_place(
     data: TravelPlaceUpdateRequest,
     user: dict = Depends(get_current_user),
 ):
-    update_fields = data.model_dump(exclude_none=True)
+    update_fields = data.model_dump(exclude_unset=True)
     if not update_fields:
         return await get_place(place_id, user)
+    _validate_external_urls(
+        [
+            update_fields.get("coverImageUrl"),
+            *(update_fields.get("photoUrls") or []),
+        ]
+    )
     field_map = {
         "name": "name",
         "category": "category",
@@ -302,15 +352,12 @@ async def update_place(
         "specialNotes": "special_notes",
         "coverImageUrl": "cover_image_url",
         "photoUrls": "photo_urls_json",
+        "coverMediaId": "cover_media_id",
+        "photoMediaIds": "photo_media_ids_json",
         "tags": "tags_json",
         "visibility": "visibility",
     }
-    clauses = []
-    values = []
-    for key, value in update_fields.items():
-        clauses.append(f"{field_map[key]} = %s")
-        values.append(dump_json(value) if key in {"photoUrls", "tags"} else value)
-    values.append(place_id)
+    removed_media_ids: list[str] = []
     with get_db_connection() as connection:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -324,10 +371,44 @@ async def update_place(
                 raise HTTPException(
                     status_code=403, detail="Place owner access required"
                 )
+            old_media_ids = {
+                item
+                for item in (
+                    [row.get("cover_media_id")]
+                    + parse_json_list(row.get("photo_media_ids_json"))
+                )
+                if item
+            }
+            if "photoMediaIds" in update_fields:
+                update_fields["photoMediaIds"] = attach_media(
+                    cursor, update_fields["photoMediaIds"] or [], user
+                )
+            if update_fields.get("coverMediaId"):
+                attach_media(cursor, [update_fields["coverMediaId"]], user)
+            clauses = []
+            values = []
+            for key, value in update_fields.items():
+                clauses.append(f"{field_map[key]} = %s")
+                values.append(
+                    dump_json(value)
+                    if key in {"photoUrls", "photoMediaIds", "tags"}
+                    else value
+                )
+            values.append(place_id)
             cursor.execute(
                 f"UPDATE travel_places SET {', '.join(clauses)} WHERE id = %s",
                 values,
             )
+            next_cover = update_fields.get("coverMediaId", row.get("cover_media_id"))
+            next_photos = update_fields.get(
+                "photoMediaIds",
+                parse_json_list(row.get("photo_media_ids_json")),
+            )
+            next_media_ids = {
+                item for item in ([next_cover] + list(next_photos or [])) if item
+            }
+            removed_media_ids = list(old_media_ids - next_media_ids)
+    cleanup_unreferenced_media(removed_media_ids)
     return await get_place(place_id, user)
 
 
@@ -336,6 +417,7 @@ async def delete_place(
     place_id: str,
     user: dict = Depends(get_current_user),
 ):
+    removed_media_ids: list[str] = []
     with get_db_connection() as connection:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -358,7 +440,24 @@ async def delete_place(
                     status_code=409,
                     detail="Place is referenced by an existing course and cannot be deleted",
                 )
+            removed_media_ids = [
+                item
+                for item in (
+                    [row.get("cover_media_id")]
+                    + parse_json_list(row.get("photo_media_ids_json"))
+                )
+                if item
+            ]
+            cursor.execute(
+                "SELECT photo_media_ids_json FROM travel_place_reviews WHERE place_id = %s",
+                (place_id,),
+            )
+            for review in cursor.fetchall():
+                removed_media_ids.extend(
+                    parse_json_list(review.get("photo_media_ids_json"))
+                )
             cursor.execute("DELETE FROM travel_places WHERE id = %s", (place_id,))
+    cleanup_unreferenced_media(removed_media_ids)
     return {"message": "Place deleted"}
 
 
@@ -372,6 +471,7 @@ async def create_review(
     data: TravelReviewCreateRequest,
     user: dict = Depends(get_current_user),
 ):
+    _validate_external_urls(list(data.photoUrls))
     review_id = generate_id("review")
     with get_db_connection() as connection:
         with connection.cursor() as cursor:
@@ -389,12 +489,14 @@ async def create_review(
                 raise HTTPException(
                     status_code=403, detail="Place review access denied"
                 )
+            photo_media_ids = attach_media(cursor, data.photoMediaIds, user)
             cursor.execute(
                 """
                 INSERT INTO travel_place_reviews (
                     id, place_id, rating, headline, body, visited_at, photo_urls_json,
+                    photo_media_ids_json,
                     author_account_id, author_login_id, author_name, author_email
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     review_id,
@@ -404,6 +506,7 @@ async def create_review(
                     data.body,
                     to_mysql_datetime(data.visitedAt),
                     dump_json(data.photoUrls),
+                    dump_json(photo_media_ids),
                     user["account_id"],
                     user["login_id"],
                     user["name"],
@@ -414,4 +517,4 @@ async def create_review(
                 f"SELECT {REVIEW_COLUMNS} FROM travel_place_reviews WHERE id = %s",
                 (review_id,),
             )
-            return _map_review(cursor.fetchone())
+            return _map_review(cursor.fetchone(), cursor)

@@ -11,7 +11,6 @@ https://map.lafamila.xyz
   -> Synology reverse proxy (127.0.0.1:18043)
   -> travel-gateway-nginx
        /api/*   -> travel-api-fastapi:8010
-       /media/* -> teddy-localstack:4566
        /*        -> travel-web-next:3043
 ```
 
@@ -25,11 +24,10 @@ The commands below assume these source directories on the NAS:
 
 ## Prerequisites
 
-Verify the shared network and required infrastructure containers.
+Verify the shared network.
 
 ```bash
 docker network inspect teddy-infra
-docker ps --filter name=teddy-localstack
 ```
 
 Create the network only when it does not exist.
@@ -60,8 +58,8 @@ TRAVEL_SESSION_COOKIE_SAMESITE=lax
 TRAVEL_SESSION_COOKIE_DOMAIN=
 TRAVEL_ENABLE_PLAYWRIGHT_FALLBACK=false
 
-TRAVEL_IMPORT_LOCAL_ROOT=/imports/source
-TRAVEL_IMPORT_OUTPUT_ROOT=/imports/organized
+TRAVEL_IMPORT_LOCAL_ROOT=
+TRAVEL_IMPORT_OUTPUT_ROOT=
 TRAVEL_IMPORT_PUBLISH_ENABLED=true
 TRAVEL_IMPORT_MAX_UPLOAD_BYTES=2147483648
 TRAVEL_IMPORT_MAX_ZIP_FILES=2000
@@ -69,13 +67,25 @@ TRAVEL_IMPORT_MAX_ZIP_EXPANDED_BYTES=10737418240
 TRAVEL_IMPORT_NOMINATIM_BASE_URL=https://nominatim.openstreetmap.org
 TRAVEL_IMPORT_NOMINATIM_USER_AGENT=teddy-travel-import/1.0 (https://map.lafamila.xyz)
 
-S3_ENDPOINT_URL=http://teddy-localstack:4566
-S3_PUBLIC_BASE_URL=https://map.lafamila.xyz/media
-LOCALSTACK_STATE_URL=http://teddy-localstack:4566
+STORAGE_BACKEND=r2
+S3_ENDPOINT_URL=https://<CLOUDFLARE_ACCOUNT_ID>.r2.cloudflarestorage.com
+S3_PUBLIC_BASE_URL=
+S3_BUCKET_NAME=teddy-travel-prod
+S3_REGION=auto
+S3_AUTO_CREATE_BUCKET=false
+S3_SIGNED_URL_TTL_SECONDS=600
+AWS_ACCESS_KEY_ID=<R2_ACCESS_KEY_ID>
+AWS_SECRET_ACCESS_KEY=<R2_SECRET_ACCESS_KEY>
+AWS_DEFAULT_REGION=auto
+S3_SAVE_STATE_AFTER_UPLOAD=0
+S3_STATE_SAVE_STRICT=0
+TRAVEL_MEDIA_TEMPORARY_TTL_HOURS=24
 ```
 
 Keep `TRAVEL_OIDC_CLIENT_SECRET`, `AUTH_SERVICE_KEY_ID`, and
 `AUTH_SERVICE_SECRET` in `.env` and never put their values in this document.
+The R2 secret access key is also server-only and is displayed only once when
+the Cloudflare token is created.
 
 Verify host MariaDB connectivity from a container before starting the API.
 
@@ -119,13 +129,11 @@ docker run -d \
   --network teddy-infra \
   --add-host host.docker.internal:host-gateway \
   --env-file /volume1/www/travel-api-fastapi/.env \
-  -v /volume1/photo-import/source:/imports/source:ro \
-  -v /volume1/photo-import/organized:/imports/organized \
   travel-api-fastapi:latest
 ```
 
 Run one worker from the same image. It has no published port and shares the
-same MariaDB, S3, source, and output configuration. A MariaDB advisory lock
+same MariaDB and R2 configuration. A MariaDB advisory lock
 prevents a second worker from sending parallel Nominatim requests.
 
 ```bash
@@ -137,8 +145,6 @@ docker run -d \
   --network teddy-infra \
   --add-host host.docker.internal:host-gateway \
   --env-file /volume1/www/travel-api-fastapi/.env \
-  -v /volume1/photo-import/source:/imports/source:ro \
-  -v /volume1/photo-import/organized:/imports/organized \
   travel-api-fastapi:latest \
   python -m src.import_worker
 ```
@@ -191,14 +197,6 @@ server {
         proxy_connect_timeout 10s;
         proxy_read_timeout 300s;
         proxy_send_timeout 300s;
-    }
-
-    location /media/ {
-        rewrite ^/media/(.*)$ /$1 break;
-        proxy_pass http://teddy-localstack:4566;
-        proxy_set_header Host teddy-localstack:4566;
-        proxy_connect_timeout 10s;
-        proxy_read_timeout 120s;
     }
 
     location / {

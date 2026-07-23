@@ -695,8 +695,8 @@ class ImportPublishCoverTests(unittest.TestCase):
             ],
         ]
         cursor.fetchone.return_value = None
-        publish_asset_file.side_effect = lambda _place_id, asset: (
-            f"https://cdn.example/{asset['id']}.jpg"
+        publish_asset_file.side_effect = (
+            lambda _cursor, _place_id, asset, _owner_id: f"media-{asset['id']}"
         )
 
         _publish_batch(
@@ -725,7 +725,7 @@ class ImportPublishCoverTests(unittest.TestCase):
         )
         self.assertEqual(
             place_insert.args[1][7],
-            "https://cdn.example/gallery-first.jpg",
+            "media-gallery-first",
         )
 
     def test_publish_falls_back_to_first_ordered_gallery_without_mutating_role(

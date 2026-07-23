@@ -58,12 +58,12 @@ from ..services.import_repository import (
     list_batches,
     lock_mutable_batch,
 )
+from ..services.media import register_attached_object
 from ..services.storage import (
     copy_object,
     delete_object,
     delete_prefix,
     get_object,
-    public_object_url,
     upload_fileobj_to_key,
 )
 from ..services.place_links import (
@@ -960,13 +960,16 @@ def _publish_batch(batch_id: str, user: dict) -> None:
                     (cluster["id"],),
                 )
                 assets = cursor.fetchall()
-                final_url_by_asset = {
-                    asset["id"]: _publish_asset_file(place_id, asset) for asset in assets
+                final_media_by_asset = {
+                    asset["id"]: _publish_asset_file(
+                        cursor, place_id, asset, user["account_id"]
+                    )
+                    for asset in assets
                 }
-                photo_urls = list(dict.fromkeys(final_url_by_asset.values()))
+                photo_media_ids = list(dict.fromkeys(final_media_by_asset.values()))
                 cover_asset_id = _select_publish_cover_asset_id(assets)
-                cover_url = (
-                    final_url_by_asset[cover_asset_id] if cover_asset_id else None
+                cover_media_id = (
+                    final_media_by_asset[cover_asset_id] if cover_asset_id else None
                 )
                 if cluster["publish_action"] == "create":
                     place_address = (
@@ -978,28 +981,36 @@ def _publish_batch(batch_id: str, user: dict) -> None:
                             """
                             INSERT INTO travel_places (
                                 id, name, category, latitude, longitude, address,
-                                description, cover_image_url, photo_urls_json, tags_json,
+                                description, cover_image_url, photo_urls_json,
+                                cover_media_id, photo_media_ids_json, tags_json,
                                 owner_account_id, owner_login_id, owner_name, owner_email,
                                 visibility
-                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, '[]',
-                                      %s, %s, %s, %s, %s)
+                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, NULL, '[]',
+                                      %s, %s, '[]', %s, %s, %s, %s, %s)
                             """,
                             (
                                 place_id, cluster["draft_name"], cluster["draft_category"],
                                 cluster["latitude"], cluster["longitude"],
                                 place_address,
-                                cluster.get("draft_description"), cover_url, dump_json(photo_urls),
+                                cluster.get("draft_description"),
+                                cover_media_id,
+                                dump_json(photo_media_ids),
                                 user["account_id"], user["login_id"], user["name"],
                                 user.get("email"), cluster.get("draft_visibility") or "public",
                             ),
                         )
                 else:
                     place = _require_manageable_place(cursor, place_id, user)
-                    merged_urls = list(dict.fromkeys(parse_json_list(place.get("photo_urls_json")) + photo_urls))
+                    merged_media_ids = list(
+                        dict.fromkeys(
+                            parse_json_list(place.get("photo_media_ids_json"))
+                            + photo_media_ids
+                        )
+                    )
                     cursor.execute(
-                        "UPDATE travel_places SET photo_urls_json = %s, "
-                        "cover_image_url = COALESCE(cover_image_url, %s) WHERE id = %s",
-                        (dump_json(merged_urls), cover_url, place_id),
+                        "UPDATE travel_places SET photo_media_ids_json = %s, "
+                        "cover_media_id = COALESCE(cover_media_id, %s) WHERE id = %s",
+                        (dump_json(merged_media_ids), cover_media_id, place_id),
                     )
                 for asset in assets:
                     if asset["role"] != "review":
@@ -1018,14 +1029,16 @@ def _publish_batch(batch_id: str, user: dict) -> None:
                             """
                             INSERT INTO travel_place_reviews (
                                 id, place_id, rating, headline, body, visited_at,
-                                photo_urls_json, author_account_id, author_login_id,
+                                photo_urls_json, photo_media_ids_json,
+                                author_account_id, author_login_id,
                                 author_name, author_email
-                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            ) VALUES (%s, %s, %s, %s, %s, %s, '[]', %s,
+                                      %s, %s, %s, %s)
                             """,
                             (
                                 review_id, place_id, asset["rating"], asset.get("headline"),
                                 asset["body"], asset.get("visited_at"),
-                                dump_json([final_url_by_asset[asset["id"]]]),
+                                dump_json([final_media_by_asset[asset["id"]]]),
                                 user["account_id"], user["login_id"], user["name"],
                                 user.get("email"),
                             ),
@@ -1056,7 +1069,9 @@ def _select_publish_cover_asset_id(assets: list[dict]) -> str | None:
     )
 
 
-def _publish_asset_file(place_id: str, asset: dict) -> str:
+def _publish_asset_file(
+    cursor, place_id: str, asset: dict, owner_account_id: str
+) -> str:
     filename = f"{(asset.get('sha256') or asset['id'])[:16]}-{safe_segment(asset['original_name'], 'asset')}"
     key = f"places/{place_id}/{filename}"
     if asset["storage_kind"] == "local":
@@ -1084,7 +1099,14 @@ def _publish_asset_file(place_id: str, asset: dict) -> str:
         if not source_key:
             raise HTTPException(status_code=409, detail=f"Asset source is missing: {asset['id']}")
         copy_object(source_key, key)
-    return public_object_url(key)
+    return register_attached_object(
+        cursor,
+        object_key=key,
+        content_type=asset.get("media_type") or "application/octet-stream",
+        original_name=asset["original_name"],
+        owner_account_id=owner_account_id,
+        byte_size=asset.get("byte_size"),
+    )
 
 
 def _stream_confined_file(root: Path, path: Path):

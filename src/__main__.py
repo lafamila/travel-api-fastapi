@@ -13,6 +13,7 @@ try:
     from .routers.places import router as places_router
     from .routers.session import router as session_router
     from .routers.uploads import router as uploads_router
+    from .services.media import cleanup_stale_temporary_media
     from .services.storage import ensure_bucket
 except ImportError:  # pragma: no cover
     from config import TRAVEL_ALLOWED_ORIGINS, TRAVEL_ENABLE_PLAYWRIGHT_FALLBACK
@@ -23,6 +24,7 @@ except ImportError:  # pragma: no cover
     from routers.places import router as places_router
     from routers.session import router as session_router
     from routers.uploads import router as uploads_router
+    from services.media import cleanup_stale_temporary_media
     from services.storage import ensure_bucket
 
 
@@ -30,6 +32,7 @@ except ImportError:  # pragma: no cover
 async def lifespan(app: FastAPI):
     init_db()
     ensure_bucket()
+    cleanup_stale_temporary_media()
 
     browser = None
     playwright = None

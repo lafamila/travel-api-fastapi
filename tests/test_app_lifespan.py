@@ -16,6 +16,7 @@ class AppLifespanTests(unittest.TestCase):
             with (
                 patch.object(app_module, "init_db"),
                 patch.object(app_module, "ensure_bucket"),
+                patch.object(app_module, "cleanup_stale_temporary_media"),
                 patch.object(app_module, "TRAVEL_ENABLE_PLAYWRIGHT_FALLBACK", False),
             ):
                 async with app_module.lifespan(app):

@@ -27,6 +27,8 @@ class TravelReview(BaseModel):
     body: str
     visitedAt: str | None = None
     photoUrls: list[str] = Field(default_factory=list)
+    photoMediaIds: list[str] = Field(default_factory=list)
+    externalPhotoUrls: list[str] = Field(default_factory=list)
     createdAt: str
     updatedAt: str
     authorAccountId: str
@@ -41,6 +43,7 @@ class TravelReviewCreateRequest(BaseModel):
     body: str
     visitedAt: str | None = None
     photoUrls: list[str] = Field(default_factory=list)
+    photoMediaIds: list[str] = Field(default_factory=list)
 
 
 class TravelPlaceBase(BaseModel):
@@ -54,6 +57,8 @@ class TravelPlaceBase(BaseModel):
     specialNotes: str | None = None
     coverImageUrl: str | None = None
     photoUrls: list[str] = Field(default_factory=list)
+    coverMediaId: str | None = None
+    photoMediaIds: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     visibility: TravelPlaceVisibility = "public"
 
@@ -81,6 +86,8 @@ class TravelPlaceUpdateRequest(BaseModel):
     specialNotes: str | None = None
     coverImageUrl: str | None = None
     photoUrls: list[str] | None = None
+    coverMediaId: str | None = None
+    photoMediaIds: list[str] | None = None
     tags: list[str] | None = None
     visibility: TravelPlaceVisibility | None = None
 
@@ -94,6 +101,8 @@ class TravelPlace(TravelPlaceBase):
     ownerLoginId: str
     ownerName: str
     ownerEmail: str | None = None
+    externalCoverImageUrl: str | None = None
+    externalPhotoUrls: list[str] = Field(default_factory=list)
 
 
 class MapLinkResolution(BaseModel):

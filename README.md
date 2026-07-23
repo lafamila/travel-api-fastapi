@@ -91,8 +91,12 @@ Session helpers are `POST /api/session/import-access-application` (requests the
 and `POST /api/session/refresh` to force OIDC token refresh. The existing
 `POST /api/session/service-application` continues to request `user`.
 
-Publishing is off by default. Set `TRAVEL_IMPORT_PUBLISH_ENABLED=true` only in
-production after final S3 and database configuration is verified. Incomplete
+Publishing is off by default. Development uses LocalStack with
+`STORAGE_BACKEND=localstack`; production uses the pre-created private R2 bucket
+with `STORAGE_BACKEND=r2`. Persistent rows store `travel_media` IDs and object
+keys, while API responses resolve them to short-lived read URLs. Set
+`TRAVEL_IMPORT_PUBLISH_ENABLED=true` only in production after final storage and
+database configuration is verified. Incomplete
 review drafts are validation warnings and are omitted from review publishing;
 their photos remain attached to the place. The importer never generates rating
 or review text.
@@ -115,5 +119,5 @@ docker run --rm --env-file .env travel-api-fastapi python -m src.import_worker
 ```
 
 The image includes Playwright Chromium for the optional Google fallback and
-uses `GET /docs` for its liveness check. MySQL/MariaDB and S3/LocalStack remain
+uses `GET /docs` for its liveness check. MySQL/MariaDB and LocalStack/R2 remain
 external dependencies configured through `.env.example`.

@@ -56,6 +56,7 @@ def init_db(
             )
             cursor.execute(f"USE {database}")
             _create_tables(cursor)
+            _create_media_table(cursor)
             _create_import_tables(cursor)
             _extend_existing_tables(cursor)
             _extend_import_tables(cursor)
@@ -270,6 +271,27 @@ def _create_tables(cursor) -> None:
     )
 
 
+def _create_media_table(cursor) -> None:
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS travel_media (
+            id VARCHAR(50) PRIMARY KEY,
+            bucket_name VARCHAR(255) NOT NULL,
+            object_key VARCHAR(1500) NOT NULL,
+            content_type VARCHAR(255) NOT NULL DEFAULT 'application/octet-stream',
+            original_name VARCHAR(500) NULL,
+            byte_size BIGINT NULL,
+            owner_account_id VARCHAR(64) NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'temporary',
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_travel_media_object (bucket_name(100), object_key(600)),
+            INDEX idx_travel_media_owner_status (owner_account_id, status, created_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """
+    )
+
+
 def _extend_existing_tables(cursor) -> None:
     columns = {
         "travel_places": {
@@ -278,12 +300,15 @@ def _extend_existing_tables(cursor) -> None:
             "owner_name": "VARCHAR(255) NULL",
             "owner_email": "VARCHAR(320) NULL",
             "visibility": "VARCHAR(20) NULL DEFAULT 'public'",
+            "cover_media_id": "VARCHAR(50) NULL",
+            "photo_media_ids_json": "LONGTEXT NULL",
         },
         "travel_place_reviews": {
             "author_account_id": "VARCHAR(64) NULL",
             "author_login_id": "VARCHAR(255) NULL",
             "author_name": "VARCHAR(255) NULL",
             "author_email": "VARCHAR(320) NULL",
+            "photo_media_ids_json": "LONGTEXT NULL",
         },
         "travel_courses": {
             "owner_account_id": "VARCHAR(64) NULL",

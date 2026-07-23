@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, File, Form, UploadFile, status
 
 from ..auth_utils import get_current_user
-from ..services.storage import upload_image
+from ..services.media import create_uploaded_media
 
 router = APIRouter(prefix="/api/uploads", tags=["uploads"])
 
@@ -18,11 +18,13 @@ async def upload_files(
     uploaded = []
     for file in files:
         uploaded.append(
-            upload_image(
+            create_uploaded_media(
                 file_obj=file.file,
                 filename=file.filename or "upload.bin",
                 content_type=file.content_type or "application/octet-stream",
                 folder=folder,
+                owner_account_id=user["account_id"],
+                byte_size=file.size,
             )
         )
 
