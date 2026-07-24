@@ -436,6 +436,61 @@ class ImportCoverAndClusteringTests(unittest.IsolatedAsyncioTestCase):
             ("asset-new-cover", "cluster-1", "batch-1"),
         )
 
+    @patch("src.routers.imports._require_batch")
+    @patch("src.routers.imports.get_batch_detail", return_value={"id": "batch-1"})
+    @patch("src.routers.imports._refresh_manifest")
+    @patch("src.routers.imports._lock_draft_mutation")
+    @patch("src.routers.imports.get_db_connection")
+    async def test_role_change_recalculates_draft_after_oldest_photo_is_removed(
+        self,
+        get_db_connection: MagicMock,
+        _lock_draft_mutation: MagicMock,
+        _refresh_manifest: MagicMock,
+        _get_batch_detail: MagicMock,
+        _require_batch: MagicMock,
+    ) -> None:
+        cursor = _mock_connection(get_db_connection)
+        cursor.fetchone.return_value = {
+            "id": "asset-oldest",
+            "batch_id": "batch-1",
+            "cluster_id": "cluster-1",
+            "classification": "photo",
+            "role": "review",
+            "captured_at": None,
+        }
+        cursor.fetchall.return_value = [{"draft_id": "draft-1"}]
+
+        await patch_import_asset(
+            "batch-1",
+            "asset-oldest",
+            ImportAssetPatchRequest(role="gallery"),
+        )
+
+        calls = cursor.execute.call_args_list
+        lock_index = next(
+            index
+            for index, call in enumerate(calls)
+            if "SELECT review.id AS draft_id" in call.args[0]
+        )
+        delete_index = next(
+            index
+            for index, call in enumerate(calls)
+            if "DELETE FROM travel_import_review_draft_assets" in call.args[0]
+        )
+        refresh_call = next(
+            call
+            for call in calls
+            if "MIN(asset.captured_at) AS oldest_captured_at" in call.args[0]
+        )
+        refresh_index = calls.index(refresh_call)
+
+        self.assertLess(lock_index, delete_index)
+        self.assertLess(delete_index, refresh_index)
+        self.assertEqual(refresh_call.args[1], ("draft-1",))
+        self.assertIn(
+            "SET review.visited_at = capture.oldest_captured_at", refresh_call.args[0]
+        )
+
 
 class ImportRepresentativePatchTests(unittest.IsolatedAsyncioTestCase):
     @patch("src.routers.imports._require_batch")
@@ -583,6 +638,64 @@ class ImportMergeSplitRepresentativeTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("representative_asset_id", geographic_update)
 
+    @patch("src.routers.imports._require_batch")
+    @patch("src.routers.imports.get_batch_detail", return_value={"id": "batch-1"})
+    @patch("src.routers.imports._refresh_manifest")
+    @patch("src.routers.imports._lock_draft_mutation")
+    @patch("src.routers.imports.get_db_connection")
+    async def test_merge_preserves_all_review_drafts_and_their_contents(
+        self,
+        get_db_connection: MagicMock,
+        _lock_draft_mutation: MagicMock,
+        _refresh_manifest: MagicMock,
+        _get_batch_detail: MagicMock,
+        _require_batch: MagicMock,
+    ) -> None:
+        cursor = _mock_connection(get_db_connection)
+        cursor.fetchall.side_effect = [
+            [
+                {
+                    "id": "cluster-1",
+                    "sort_order": 1,
+                    "representative_asset_id": None,
+                },
+                {
+                    "id": "cluster-2",
+                    "sort_order": 2,
+                    "representative_asset_id": None,
+                },
+            ],
+            [
+                {"id": "asset-1", "latitude": 37.5, "longitude": 127.0},
+                {"id": "asset-2", "latitude": 37.5001, "longitude": 127.0001},
+            ],
+        ]
+
+        await merge_import_clusters(
+            "batch-1",
+            ImportClusterMergeRequest(clusterIds=["cluster-1", "cluster-2"]),
+        )
+
+        review_update = next(
+            call
+            for call in cursor.execute.call_args_list
+            if "UPDATE travel_import_review_drafts SET cluster_id = %s" in call.args[0]
+        )
+        self.assertEqual(
+            review_update.args[1],
+            ("cluster-1", "batch-1", "cluster-1", "cluster-2"),
+        )
+        self.assertNotIn("rating", review_update.args[0])
+        self.assertNotIn("body", review_update.args[0])
+        self.assertFalse(
+            any(
+                "DELETE FROM travel_import_review_drafts" in call.args[0]
+                or "UPDATE travel_import_review_draft_assets" in call.args[0]
+                or "DELETE FROM travel_import_review_draft_assets" in call.args[0]
+                for call in cursor.execute.call_args_list
+            )
+        )
+
     @patch("src.routers.imports.generate_id", return_value="cluster-new")
     @patch("src.routers.imports._require_batch")
     @patch("src.routers.imports.get_batch_detail", return_value={"id": "batch-1"})
@@ -693,10 +806,11 @@ class ImportPublishCoverTests(unittest.TestCase):
                 {"id": "gallery-first", "role": "gallery"},
                 {"id": "gallery-second", "role": "gallery"},
             ],
+            [],
         ]
         cursor.fetchone.return_value = None
-        publish_asset_file.side_effect = (
-            lambda _cursor, _place_id, asset, _owner_id: f"media-{asset['id']}"
+        publish_asset_file.side_effect = lambda _cursor, _place_id, asset, _owner_id: (
+            f"media-{asset['id']}"
         )
 
         _publish_batch(

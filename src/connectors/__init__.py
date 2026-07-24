@@ -432,7 +432,8 @@ def _create_import_tables(cursor) -> None:
         CREATE TABLE IF NOT EXISTS travel_import_review_drafts (
             id VARCHAR(50) PRIMARY KEY,
             batch_id VARCHAR(50) NOT NULL,
-            asset_id VARCHAR(50) NOT NULL,
+            cluster_id VARCHAR(50) NULL,
+            asset_id VARCHAR(50) NULL,
             rating INT NULL,
             headline VARCHAR(255) NULL,
             body TEXT NULL,
@@ -441,9 +442,23 @@ def _create_import_tables(cursor) -> None:
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             FOREIGN KEY (batch_id) REFERENCES travel_import_batches(id) ON DELETE CASCADE,
+            FOREIGN KEY (cluster_id) REFERENCES travel_import_clusters(id) ON DELETE CASCADE,
             FOREIGN KEY (asset_id) REFERENCES travel_import_assets(id) ON DELETE CASCADE,
             UNIQUE KEY uq_import_review_asset (asset_id),
             INDEX idx_import_review_batch (batch_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS travel_import_review_draft_assets (
+            draft_id VARCHAR(50) NOT NULL,
+            asset_id VARCHAR(50) NOT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (asset_id),
+            FOREIGN KEY (draft_id) REFERENCES travel_import_review_drafts(id) ON DELETE CASCADE,
+            FOREIGN KEY (asset_id) REFERENCES travel_import_assets(id) ON DELETE CASCADE,
+            INDEX idx_import_review_draft_asset_draft (draft_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """
     )
@@ -499,6 +514,23 @@ def _ensure_column(cursor, table: str, column: str, definition: str) -> None:
         )
 
 
+def _ensure_nullable_column(cursor, table: str, column: str, definition: str) -> None:
+    cursor.execute(
+        """
+        SELECT IS_NULLABLE AS is_nullable
+        FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND COLUMN_NAME = %s
+        """,
+        (DB_CONFIG["database"], table, column),
+    )
+    row = cursor.fetchone()
+    if row and row["is_nullable"] != "YES":
+        cursor.execute(
+            f"ALTER TABLE {_quote_identifier(table)} "
+            f"MODIFY COLUMN {_quote_identifier(column)} {definition}"
+        )
+
+
 def _extend_import_tables(cursor) -> None:
     _ensure_column(
         cursor,
@@ -517,6 +549,61 @@ def _extend_import_tables(cursor) -> None:
         "travel_import_clusters",
         "map_link",
         "VARCHAR(2000) NULL",
+    )
+    _ensure_column(
+        cursor,
+        "travel_import_review_drafts",
+        "cluster_id",
+        "VARCHAR(50) NULL",
+    )
+    _ensure_nullable_column(
+        cursor,
+        "travel_import_review_drafts",
+        "asset_id",
+        "VARCHAR(50) NULL",
+    )
+    _drop_index_if_exists(
+        cursor,
+        "travel_import_review_drafts",
+        "uq_import_review_batch_cluster",
+    )
+    cursor.execute(
+        """
+        UPDATE travel_import_review_drafts review
+        JOIN travel_import_assets asset ON asset.id = review.asset_id
+        SET review.cluster_id = asset.cluster_id
+        WHERE review.cluster_id IS NULL AND asset.cluster_id IS NOT NULL
+        """
+    )
+    cursor.execute(
+        """
+        INSERT INTO travel_import_review_draft_assets (draft_id, asset_id)
+        SELECT review.id, review.asset_id
+        FROM travel_import_review_drafts review
+        JOIN travel_import_assets asset ON asset.id = review.asset_id
+        WHERE review.asset_id IS NOT NULL
+        ON DUPLICATE KEY UPDATE draft_id = VALUES(draft_id)
+        """
+    )
+    cursor.execute(
+        """
+        UPDATE travel_import_review_drafts
+        SET asset_id = NULL
+        WHERE asset_id IS NOT NULL
+        """
+    )
+    cursor.execute(
+        """
+        UPDATE travel_import_review_drafts review
+        JOIN (
+            SELECT link.draft_id, MIN(asset.captured_at) AS oldest_captured_at
+            FROM travel_import_review_draft_assets link
+            JOIN travel_import_assets asset ON asset.id = link.asset_id
+            WHERE asset.captured_at IS NOT NULL
+            GROUP BY link.draft_id
+        ) capture ON capture.draft_id = review.id
+        SET review.visited_at = capture.oldest_captured_at
+        """
     )
     cursor.execute(
         "UPDATE travel_import_clusters SET draft_visibility = 'public' "
@@ -537,6 +624,22 @@ def _ensure_index(cursor, table: str, index: str, columns: str) -> None:
         cursor.execute(
             f"CREATE INDEX {_quote_identifier(index)} "
             f"ON {_quote_identifier(table)} ({columns})"
+        )
+
+
+def _drop_index_if_exists(cursor, table: str, index: str) -> None:
+    cursor.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM information_schema.STATISTICS
+        WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s AND INDEX_NAME = %s
+        """,
+        (DB_CONFIG["database"], table, index),
+    )
+    if cursor.fetchone()["count"] > 0:
+        cursor.execute(
+            f"ALTER TABLE {_quote_identifier(table)} "
+            f"DROP INDEX {_quote_identifier(index)}"
         )
 
 

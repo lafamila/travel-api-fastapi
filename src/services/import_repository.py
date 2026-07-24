@@ -62,9 +62,7 @@ def list_batches() -> list[dict]:
 
 def get_batch_row(batch_id: str, *, cursor=None) -> dict | None:
     if cursor is not None:
-        cursor.execute(
-            "SELECT * FROM travel_import_batches WHERE id = %s", (batch_id,)
-        )
+        cursor.execute("SELECT * FROM travel_import_batches WHERE id = %s", (batch_id,))
         return cursor.fetchone()
     with get_db_connection() as connection:
         with connection.cursor() as own_cursor:
@@ -78,16 +76,8 @@ def get_batch_detail(batch_id: str) -> dict:
             if not batch:
                 raise KeyError(batch_id)
             cursor.execute(
-                """
-                SELECT asset.*, review.id AS review_id, review.rating,
-                       review.headline, review.body, review.visited_at,
-                       review.published_review_id
-                FROM travel_import_assets asset
-                LEFT JOIN travel_import_review_drafts review
-                  ON review.asset_id = asset.id
-                WHERE asset.batch_id = %s
-                ORDER BY asset.created_at, asset.id
-                """,
+                "SELECT * FROM travel_import_assets WHERE batch_id = %s "
+                "ORDER BY created_at, id",
                 (batch_id,),
             )
             assets = cursor.fetchall()
@@ -97,6 +87,24 @@ def get_batch_detail(batch_id: str) -> dict:
                 (batch_id,),
             )
             clusters = cursor.fetchall()
+            cursor.execute(
+                "SELECT * FROM travel_import_review_drafts "
+                "WHERE batch_id = %s AND cluster_id IS NOT NULL "
+                "ORDER BY created_at, id",
+                (batch_id,),
+            )
+            review_drafts = cursor.fetchall()
+            cursor.execute(
+                """
+                SELECT link.draft_id, link.asset_id
+                FROM travel_import_review_draft_assets link
+                JOIN travel_import_review_drafts review ON review.id = link.draft_id
+                WHERE review.batch_id = %s
+                ORDER BY link.created_at, link.asset_id
+                """,
+                (batch_id,),
+            )
+            review_asset_links = cursor.fetchall()
             cursor.execute(
                 "SELECT * FROM travel_import_jobs WHERE batch_id = %s "
                 "ORDER BY created_at DESC",
@@ -124,8 +132,21 @@ def get_batch_detail(batch_id: str) -> dict:
         _map_cluster(cluster, asset_ids_by_cluster.get(cluster["id"], []))
         for cluster in clusters
     ]
+    review_asset_ids: dict[str, list[str]] = {}
+    for link in review_asset_links:
+        review_asset_ids.setdefault(link["draft_id"], []).append(link["asset_id"])
+    result["reviewDrafts"] = [
+        _map_review_draft(review, review_asset_ids.get(review["id"], []))
+        for review in review_drafts
+    ]
     result["jobs"] = [_map_job(job) for job in jobs]
-    result["manifest"] = _load_json(batch.get("manifest_json"))
+    manifest = _load_json(batch.get("manifest_json"))
+    if isinstance(manifest, dict):
+        manifest["reviewDrafts"] = result["reviewDrafts"]
+        for asset in manifest.get("assets", []):
+            if isinstance(asset, dict):
+                asset.pop("review", None)
+    result["manifest"] = manifest
     return result
 
 
@@ -145,9 +166,7 @@ def lock_mutable_batch(
     if not batch:
         raise KeyError(batch_id)
     if batch["status"] not in allowed_statuses:
-        raise ValueError(
-            f"Batch status {batch['status']} does not allow this mutation"
-        )
+        raise ValueError(f"Batch status {batch['status']} does not allow this mutation")
     return batch
 
 
@@ -253,9 +272,7 @@ def enqueue_process_job(batch_id: str) -> dict:
                 """,
                 (batch_id,),
             )
-            cursor.execute(
-                "SELECT * FROM travel_import_jobs WHERE id = %s", (job_id,)
-            )
+            cursor.execute("SELECT * FROM travel_import_jobs WHERE id = %s", (job_id,))
             return _map_job(cursor.fetchone())
 
 
@@ -311,9 +328,7 @@ def claim_next_job(worker_id: str, stale_seconds: int) -> dict | None:
             return job
 
 
-def update_job_progress(
-    job_id: str, batch_id: str, current: int, total: int
-) -> None:
+def update_job_progress(job_id: str, batch_id: str, current: int, total: int) -> None:
     with get_db_connection() as connection:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -410,15 +425,6 @@ def _map_batch(row: dict) -> dict:
 
 
 def _map_asset(row: dict) -> dict:
-    review = None
-    if row.get("review_id"):
-        review = {
-            "rating": row.get("rating"),
-            "headline": row.get("headline"),
-            "body": row.get("body"),
-            "visitedAt": _iso(row.get("visited_at")),
-            "publishedReviewId": row.get("published_review_id"),
-        }
     thumbnail_available = bool(row.get("thumbnail_key"))
     return {
         "id": row["id"],
@@ -445,7 +451,6 @@ def _map_asset(row: dict) -> dict:
             else None
         ),
         "metadata": _load_json(row.get("metadata_json")),
-        "review": review,
         "processedAt": _iso(row.get("processed_at")),
     }
 
@@ -463,9 +468,7 @@ def _map_cluster(row: dict, asset_ids: list[str]) -> dict:
         "suggestedName": row.get("suggested_name"),
         "mapLink": row.get("map_link"),
         "geocodingStatus": (
-            "resolved"
-            if row.get("address") or row.get("country_code")
-            else "idle"
+            "resolved" if row.get("address") or row.get("country_code") else "idle"
         ),
         "draft": {
             "name": row.get("draft_name"),
@@ -478,6 +481,22 @@ def _map_cluster(row: dict, asset_ids: list[str]) -> dict:
         "existingPlaceId": row.get("existing_place_id"),
         "publishedPlaceId": row.get("published_place_id"),
         "assetIds": sorted(asset_ids),
+    }
+
+
+def _map_review_draft(row: dict, asset_ids: list[str]) -> dict:
+    return {
+        "id": row["id"],
+        "batchId": row["batch_id"],
+        "clusterId": row["cluster_id"],
+        "rating": row.get("rating"),
+        "headline": row.get("headline"),
+        "body": row.get("body"),
+        "visitedAt": _iso(row.get("visited_at")),
+        "assetIds": sorted(asset_ids),
+        "publishedReviewId": row.get("published_review_id"),
+        "createdAt": _iso(row.get("created_at")),
+        "updatedAt": _iso(row.get("updated_at")),
     }
 
 

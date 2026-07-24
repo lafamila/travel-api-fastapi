@@ -313,7 +313,12 @@ def validate_cluster_radius(
     return representative
 
 
-def build_manifest(batch: dict, assets: list[dict], clusters: list[dict]) -> dict:
+def build_manifest(
+    batch: dict,
+    assets: list[dict],
+    clusters: list[dict],
+    review_drafts: list[dict] | None = None,
+) -> dict:
     return {
         "version": MANIFEST_VERSION,
         "batch": {
@@ -338,7 +343,6 @@ def build_manifest(batch: dict, assets: list[dict], clusters: list[dict]) -> dic
                 "excluded": bool(asset.get("excluded")),
                 "clusterId": asset.get("cluster_id"),
                 "organizedPath": asset.get("organized_path"),
-                "review": asset.get("review"),
             }
             for asset in sorted(assets, key=lambda item: item["id"])
         ],
@@ -369,6 +373,22 @@ def build_manifest(batch: dict, assets: list[dict], clusters: list[dict]) -> dic
             for cluster in sorted(
                 clusters, key=lambda item: (item.get("sort_order", 0), item["id"])
             )
+        ],
+        "reviewDrafts": [
+            {
+                "id": review["id"],
+                "batchId": review["batch_id"],
+                "clusterId": review["cluster_id"],
+                "rating": review.get("rating"),
+                "headline": review.get("headline"),
+                "body": review.get("body"),
+                "visitedAt": _iso(review.get("visited_at")),
+                "assetIds": sorted(review.get("asset_ids", [])),
+                "publishedReviewId": review.get("published_review_id"),
+                "createdAt": _iso(review.get("created_at")),
+                "updatedAt": _iso(review.get("updated_at")),
+            }
+            for review in sorted(review_drafts or [], key=lambda item: item["id"])
         ],
     }
 

@@ -6,6 +6,7 @@ from ..connectors import get_db_connection
 from ..utils import generate_id
 from .authorization import can_manage_place
 from .import_repository import lock_mutable_batch
+from .import_review_drafts import detach_review_assets
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,11 @@ def assign_assets_to_cluster(
                 f"WHERE batch_id = %s AND id IN ({placeholders})",
                 (cluster_id, batch_id, *asset_ids),
             )
+            detach_review_assets(
+                cursor,
+                asset_ids=asset_ids,
+                retained_cluster_id=cluster_id,
+            )
             if selected_covers:
                 synchronize_cluster_representative(
                     cursor,
@@ -72,6 +78,10 @@ def unassign_assets(*, batch_id: str, asset_ids: list[str]) -> None:
                 f"UPDATE travel_import_assets SET cluster_id = NULL "
                 f"WHERE batch_id = %s AND id IN ({placeholders})",
                 (batch_id, *asset_ids),
+            )
+            detach_review_assets(
+                cursor,
+                asset_ids=asset_ids,
             )
 
 
@@ -121,11 +131,9 @@ def create_cluster_with_assets(
                     422, "Representative asset must be one of the selected assets"
                 )
             selected_by_id = {asset["id"]: asset for asset in assets}
-            if (
-                representative_asset_id
-                and selected_by_id[representative_asset_id]["role"]
-                not in {"gallery", "cover"}
-            ):
+            if representative_asset_id and selected_by_id[representative_asset_id][
+                "role"
+            ] not in {"gallery", "cover"}:
                 raise ImportAssignmentError(
                     422, "Representative asset must have gallery or cover role"
                 )

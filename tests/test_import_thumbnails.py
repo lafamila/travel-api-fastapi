@@ -15,18 +15,33 @@ from src.services.import_repository import _map_asset
 
 
 class _SchemaCursor:
-    def __init__(self, existing_columns: set[tuple[str, str]]) -> None:
+    def __init__(
+        self,
+        existing_columns: set[tuple[str, str]],
+        *,
+        nullable_columns: set[tuple[str, str]] | None = None,
+        existing_indexes: set[tuple[str, str]] | None = None,
+    ) -> None:
         self.existing_columns = existing_columns
-        self.current_column: tuple[str, str] | None = None
+        self.nullable_columns = nullable_columns or set()
+        self.existing_indexes = existing_indexes or set()
+        self.result: dict = {"count": 0}
         self.statements: list[str] = []
 
     def execute(self, query, parameters=None) -> None:
         self.statements.append(query)
-        if "information_schema.COLUMNS" in query:
-            self.current_column = (parameters[1], parameters[2])
+        key = (parameters[1], parameters[2]) if parameters else None
+        if "IS_NULLABLE" in query:
+            self.result = {
+                "is_nullable": "YES" if key in self.nullable_columns else "NO"
+            }
+        elif "information_schema.COLUMNS" in query:
+            self.result = {"count": int(key in self.existing_columns)}
+        elif "information_schema.STATISTICS" in query:
+            self.result = {"count": int(key in self.existing_indexes)}
 
     def fetchone(self) -> dict:
-        return {"count": int(self.current_column in self.existing_columns)}
+        return self.result
 
 
 def _mock_database_row(get_db_connection: Mock, row: dict | None) -> Mock:
@@ -44,8 +59,12 @@ class ImportThumbnailSchemaTests(unittest.TestCase):
             ("travel_import_assets", "thumbnail_key"),
             ("travel_import_assets", "manual_exclusion_reason"),
             ("travel_import_clusters", "map_link"),
+            ("travel_import_review_drafts", "cluster_id"),
         }
-        cursor = _SchemaCursor(existing)
+        cursor = _SchemaCursor(
+            existing,
+            nullable_columns={("travel_import_review_drafts", "asset_id")},
+        )
 
         _extend_import_tables(cursor)
 
@@ -56,7 +75,9 @@ class ImportThumbnailSchemaTests(unittest.TestCase):
             {
                 ("travel_import_assets", "manual_exclusion_reason"),
                 ("travel_import_clusters", "map_link"),
-            }
+                ("travel_import_review_drafts", "cluster_id"),
+            },
+            nullable_columns={("travel_import_review_drafts", "asset_id")},
         )
 
         _extend_import_tables(cursor)
@@ -64,6 +85,40 @@ class ImportThumbnailSchemaTests(unittest.TestCase):
         alterations = [query for query in cursor.statements if "ALTER TABLE" in query]
         self.assertEqual(len(alterations), 1)
         self.assertIn("`thumbnail_key` VARCHAR(1500) NULL", alterations[0])
+
+    def test_asset_review_schema_is_migrated_idempotently(self) -> None:
+        cursor = _SchemaCursor(
+            {
+                ("travel_import_assets", "thumbnail_key"),
+                ("travel_import_assets", "manual_exclusion_reason"),
+                ("travel_import_clusters", "map_link"),
+            },
+            existing_indexes={
+                ("travel_import_review_drafts", "uq_import_review_batch_cluster")
+            },
+        )
+
+        _extend_import_tables(cursor)
+
+        statements = "\n".join(cursor.statements)
+        self.assertIn("ADD COLUMN `cluster_id` VARCHAR(50) NULL", statements)
+        self.assertIn("MODIFY COLUMN `asset_id` VARCHAR(50) NULL", statements)
+        self.assertIn(
+            "INSERT INTO travel_import_review_draft_assets (draft_id, asset_id)",
+            statements,
+        )
+        self.assertIn("SELECT review.id, review.asset_id", statements)
+        self.assertNotIn("keeper_id", statements)
+        self.assertNotIn("SET review.cluster_id = NULL", statements)
+        self.assertIn("SET asset_id = NULL", statements)
+        self.assertLess(
+            statements.index(
+                "INSERT INTO travel_import_review_draft_assets (draft_id, asset_id)"
+            ),
+            statements.index("SET asset_id = NULL"),
+        )
+        self.assertIn("ON DUPLICATE KEY UPDATE draft_id = VALUES(draft_id)", statements)
+        self.assertIn("DROP INDEX `uq_import_review_batch_cluster`", statements)
 
 
 class ImportThumbnailProcessorTests(unittest.TestCase):
@@ -101,9 +156,7 @@ class ImportThumbnailProcessorTests(unittest.TestCase):
                             work_root,
                         )
 
-                    self.assertEqual(
-                        key, "imports/batch-1/thumbnails/asset-1.jpg"
-                    )
+                    self.assertEqual(key, "imports/batch-1/thumbnails/asset-1.jpg")
                     ffmpeg = commands[-1]
                     self.assertEqual(ffmpeg[0], "ffmpeg")
                     self.assertIn(
@@ -189,9 +242,7 @@ class ImportThumbnailRouteTests(unittest.IsolatedAsyncioTestCase):
         response = await get_import_asset_thumbnail("batch-1", "asset-1")
 
         self.assertIn("SELECT thumbnail_key", cursor.execute.call_args.args[0])
-        get_object.assert_called_once_with(
-            "imports/batch-1/thumbnails/asset-1.jpg"
-        )
+        get_object.assert_called_once_with("imports/batch-1/thumbnails/asset-1.jpg")
         self.assertEqual(response.media_type, "image/jpeg")
         self.assertEqual(response.headers["x-content-type-options"], "nosniff")
         self.assertEqual(

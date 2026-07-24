@@ -50,7 +50,10 @@ class ImportClusteringTests(unittest.TestCase):
         self.assertGreater(len(clusters), 1)
         for representative, members in clusters:
             self.assertTrue(
-                all(haversine_meters(representative, member) <= 100 for member in members)
+                all(
+                    haversine_meters(representative, member) <= 100
+                    for member in members
+                )
             )
 
 
@@ -67,7 +70,9 @@ class ImportExifTests(unittest.TestCase):
             "photo.heic",
         )
         self.assertEqual(normalized["capturedAt"], datetime(2024, 3, 2, 10, 11, 12))
-        self.assertEqual(classify_photo("photo.heic", normalized).classification, "photo")
+        self.assertEqual(
+            classify_photo("photo.heic", normalized).classification, "photo"
+        )
 
     def test_screenshot_is_excluded(self) -> None:
         normalized = normalize_exif(
@@ -97,7 +102,10 @@ class ImportZipSafetyTests(unittest.TestCase):
                 archive, root / "out", max_files=10, max_expanded_bytes=100
             )
             self.assertEqual(
-                [path.relative_to((root / "out").resolve()).as_posix() for path in files],
+                [
+                    path.relative_to((root / "out").resolve()).as_posix()
+                    for path in files
+                ],
                 ["day-one/photo.jpg"],
             )
 
@@ -150,14 +158,20 @@ class ImportLocalRootTests(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "symlink semantics differ on Windows")
     def test_rejects_symlink_escape(self) -> None:
-        with tempfile.TemporaryDirectory() as raw, tempfile.TemporaryDirectory() as other:
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            tempfile.TemporaryDirectory() as other,
+        ):
             root = Path(raw)
             (root / "link").symlink_to(Path(other), target_is_directory=True)
             with self.assertRaises(ValueError):
                 resolve_local_source(root, "link")
 
     def test_confined_copy_preserves_source_and_writes_under_output(self) -> None:
-        with tempfile.TemporaryDirectory() as source_raw, tempfile.TemporaryDirectory() as output_raw:
+        with (
+            tempfile.TemporaryDirectory() as source_raw,
+            tempfile.TemporaryDirectory() as output_raw,
+        ):
             source_root = Path(source_raw)
             output_root = Path(output_raw)
             source = source_root / "day" / "photo.jpg"
@@ -179,7 +193,11 @@ class ImportLocalRootTests(unittest.TestCase):
 
     @unittest.skipIf(os.name == "nt", "descriptor-relative nofollow is POSIX-only")
     def test_confined_copy_rejects_source_and_destination_symlinks(self) -> None:
-        with tempfile.TemporaryDirectory() as source_raw, tempfile.TemporaryDirectory() as output_raw, tempfile.TemporaryDirectory() as other_raw:
+        with (
+            tempfile.TemporaryDirectory() as source_raw,
+            tempfile.TemporaryDirectory() as output_raw,
+            tempfile.TemporaryDirectory() as other_raw,
+        ):
             source_root = Path(source_raw)
             output_root = Path(output_raw)
             other = Path(other_raw)
@@ -234,10 +252,28 @@ class ImportManifestTests(unittest.TestCase):
                     "asset_ids": ["asset-1"],
                 }
             ],
+            [
+                {
+                    "id": "draft-1",
+                    "batch_id": "batch-1",
+                    "cluster_id": "cluster-1",
+                    "rating": 5,
+                    "headline": "Great",
+                    "body": "Loved it",
+                    "visited_at": datetime(2020, 1, 2, 3, 4, 5),
+                    "asset_ids": ["asset-1"],
+                    "published_review_id": None,
+                    "created_at": datetime(2020, 1, 3, 3, 4, 5),
+                    "updated_at": datetime(2020, 1, 4, 3, 4, 5),
+                }
+            ],
         )
         self.assertEqual(manifest["version"], "travel-import.v1")
         self.assertEqual(manifest["batch"]["oldestCapturedAt"], "2020-01-02T03:04:05")
         self.assertEqual(manifest["clusters"][0]["assetIds"], ["asset-1"])
+        self.assertNotIn("review", manifest["assets"][0])
+        self.assertEqual(manifest["reviewDrafts"][0]["assetIds"], ["asset-1"])
+        self.assertEqual(manifest["reviewDrafts"][0]["clusterId"], "cluster-1")
 
 
 if __name__ == "__main__":

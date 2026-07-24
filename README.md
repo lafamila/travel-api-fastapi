@@ -80,11 +80,17 @@ All routes below require `admin` or `superadmin`:
 - `POST /api/imports/{id}/assets/unassign`
 - `POST /api/imports/{id}/clusters`
 - `PATCH /api/imports/{id}/clusters/{clusterId}`
+- `POST /api/imports/{id}/clusters/{clusterId}/reviews`
+- `PATCH/DELETE /api/imports/{id}/reviews/{reviewId}`
 - `POST /api/imports/{id}/clusters/{clusterId}/assets/assign`
 - `POST /api/imports/{id}/clusters/merge`
 - `POST /api/imports/{id}/clusters/split`
 - `POST /api/imports/{id}/validate`
 - `POST /api/imports/{id}/publish`
+
+Batch detail and manifests expose cluster review drafts in the top-level
+`reviewDrafts` array. A cluster may have multiple drafts, and each draft may
+link multiple assets from that same cluster.
 
 Session helpers are `POST /api/session/import-access-application` (requests the
 `admin` permission with a Korean rationale), `GET` on the same path for status,

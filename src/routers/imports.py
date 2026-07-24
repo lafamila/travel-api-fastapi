@@ -31,6 +31,8 @@ from ..import_schemas import (
     ImportClusterDraftPatchRequest,
     ImportClusterMergeRequest,
     ImportClusterSplitRequest,
+    ImportReviewDraftCreateRequest,
+    ImportReviewDraftPatchRequest,
 )
 from ..services.import_contract import (
     GeoPoint,
@@ -57,6 +59,11 @@ from ..services.import_repository import (
     get_batch_row,
     list_batches,
     lock_mutable_batch,
+)
+from ..services.import_review_drafts import (
+    detach_review_assets,
+    lock_review_draft_ids_for_assets,
+    refresh_review_draft_visited_at,
 )
 from ..services.media import register_attached_object
 from ..services.storage import (
@@ -110,7 +117,9 @@ async def create_import_batch(
                 raise ValueError("Local photo import output root is not configured")
             resolved_output = output_root.resolve()
             if resolved_output == source or resolved_output.is_relative_to(source):
-                raise ValueError("Local import output root must be outside the source directory")
+                raise ValueError(
+                    "Local import output root must be outside the source directory"
+                )
         except (OSError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         source_path = body.localRelativePath
@@ -129,15 +138,21 @@ async def upload_import_files(
 ):
     batch = _require_batch(batch_id)
     if batch["source_type"] != "upload":
-        raise HTTPException(status_code=409, detail="Files can only be uploaded to upload batches")
+        raise HTTPException(
+            status_code=409, detail="Files can only be uploaded to upload batches"
+        )
     if batch["status"] not in {"draft", "failed"}:
-        raise HTTPException(status_code=409, detail="This batch no longer accepts files")
+        raise HTTPException(
+            status_code=409, detail="This batch no longer accepts files"
+        )
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
 
     declared_total = sum(file.size or 0 for file in files)
     if declared_total > TRAVEL_IMPORT_MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="Upload request exceeds configured limit")
+        raise HTTPException(
+            status_code=413, detail="Upload request exceeds configured limit"
+        )
     scanned_files = []
     actual_total = 0
     for file in files:
@@ -149,7 +164,9 @@ async def upload_import_files(
             size += len(chunk)
             actual_total += len(chunk)
             if actual_total > TRAVEL_IMPORT_MAX_UPLOAD_BYTES:
-                raise HTTPException(status_code=413, detail="Upload request exceeds configured limit")
+                raise HTTPException(
+                    status_code=413, detail="Upload request exceeds configured limit"
+                )
         await file.seek(0)
         scanned_files.append((file, filename, size))
 
@@ -160,7 +177,9 @@ async def upload_import_files(
         upload_fileobj_to_key(
             file.file,
             key,
-            file.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream",
+            file.content_type
+            or mimetypes.guess_type(filename)[0]
+            or "application/octet-stream",
         )
         try:
             asset_id = add_uploaded_asset(
@@ -199,7 +218,9 @@ async def process_import_batch(batch_id: str):
                     (batch_id,),
                 )
                 if cursor.fetchone()["count"] == 0:
-                    raise HTTPException(status_code=409, detail="Upload at least one file first")
+                    raise HTTPException(
+                        status_code=409, detail="Upload at least one file first"
+                    )
     try:
         return enqueue_process_job(batch_id)
     except (KeyError, ValueError) as exc:
@@ -218,7 +239,10 @@ async def get_import_batch(batch_id: str):
 async def export_import_manifest(batch_id: str):
     detail = await get_import_batch(batch_id)
     if detail.get("manifest") is None:
-        raise HTTPException(status_code=409, detail="Manifest is not available until processing completes")
+        raise HTTPException(
+            status_code=409,
+            detail="Manifest is not available until processing completes",
+        )
     return JSONResponse(
         detail["manifest"],
         headers={
@@ -260,9 +284,13 @@ async def get_import_asset_preview(batch_id: str, asset_id: str):
     suffix = Path(asset["original_name"]).suffix.lower()
     content_type = "image/jpeg" if key else _BROWSER_SAFE_PREVIEW_TYPES.get(suffix)
     if not key and suffix in {".heic", ".heif"}:
-        raise HTTPException(status_code=409, detail="HEIC preview generation was unsuccessful")
+        raise HTTPException(
+            status_code=409, detail="HEIC preview generation was unsuccessful"
+        )
     if not content_type:
-        raise HTTPException(status_code=415, detail="This file has no browser-safe preview")
+        raise HTTPException(
+            status_code=415, detail="This file has no browser-safe preview"
+        )
     security_headers = {
         "Cache-Control": "private, max-age=3600",
         "Content-Security-Policy": "sandbox; default-src 'none'",
@@ -275,7 +303,9 @@ async def get_import_asset_preview(batch_id: str, asset_id: str):
         response = get_object(object_key)
         return StreamingResponse(
             response["Body"],
-            media_type=content_type or response.get("ContentType") or "application/octet-stream",
+            media_type=content_type
+            or response.get("ContentType")
+            or "application/octet-stream",
             headers=security_headers,
         )
     path = Path(asset.get("local_source_path") or "")
@@ -286,7 +316,9 @@ async def get_import_asset_preview(batch_id: str, asset_id: str):
         with open_confined_file(root, path):
             pass
     except (OSError, ValueError) as exc:
-        raise HTTPException(status_code=404, detail="Local preview file not found") from exc
+        raise HTTPException(
+            status_code=404, detail="Local preview file not found"
+        ) from exc
     return StreamingResponse(
         _stream_confined_file(root, path),
         media_type=content_type,
@@ -338,8 +370,15 @@ async def patch_import_asset(
             asset = cursor.fetchone()
             if not asset:
                 raise HTTPException(status_code=404, detail="Import asset not found")
-            if body.role and asset["classification"] in {"screenshot", "archive"} and body.role != "excluded":
-                raise HTTPException(status_code=409, detail="Screenshots and archives must remain excluded")
+            if (
+                body.role
+                and asset["classification"] in {"screenshot", "archive"}
+                and body.role != "excluded"
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Screenshots and archives must remain excluded",
+                )
             effective_cluster_id = asset.get("cluster_id")
             if "clusterId" in body.model_fields_set:
                 effective_cluster_id = body.clusterId
@@ -349,7 +388,10 @@ async def patch_import_asset(
                         (body.clusterId, batch_id),
                     )
                     if not cursor.fetchone():
-                        raise HTTPException(status_code=422, detail="Cluster does not belong to this batch")
+                        raise HTTPException(
+                            status_code=422,
+                            detail="Cluster does not belong to this batch",
+                        )
             effective_role = body.role or asset["role"]
             if body.role:
                 cursor.execute(
@@ -396,38 +438,137 @@ async def patch_import_asset(
                     "AND representative_asset_id = %s",
                     (effective_cluster_id, batch_id, asset_id),
                 )
-            if effective_role == "review" or body.review is not None:
-                cursor.execute(
-                    """
-                    INSERT INTO travel_import_review_drafts (
-                        id, batch_id, asset_id, visited_at
-                    ) VALUES (%s, %s, %s, %s)
-                    ON DUPLICATE KEY UPDATE
-                        visited_at = COALESCE(visited_at, VALUES(visited_at))
-                    """,
-                    (generate_id("draft"), batch_id, asset_id, asset.get("captured_at")),
+            if "clusterId" in body.model_fields_set or (
+                body.role is not None and body.role != "review"
+            ):
+                detach_review_assets(
+                    cursor,
+                    asset_ids=[asset_id],
+                    retained_cluster_id=(
+                        effective_cluster_id if effective_role == "review" else None
+                    ),
                 )
-            if body.review is not None:
-                values = body.review.model_dump(exclude_unset=True)
-                column_map = {
-                    "rating": "rating",
-                    "headline": "headline",
-                    "body": "body",
-                    "visitedAt": "visited_at",
-                }
-                clauses = []
-                parameters = []
-                for field, value in values.items():
-                    clauses.append(f"{column_map[field]} = %s")
-                    parameters.append(
-                        to_mysql_datetime(value) if field == "visitedAt" else value
-                    )
-                if clauses:
-                    cursor.execute(
-                        f"UPDATE travel_import_review_drafts SET {', '.join(clauses)} "
-                        "WHERE asset_id = %s",
-                        (*parameters, asset_id),
-                    )
+    _refresh_manifest(batch_id)
+    return get_batch_detail(batch_id)
+
+
+@router.post(
+    "/{batch_id}/clusters/{cluster_id}/reviews",
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_import_review_draft(
+    batch_id: str,
+    cluster_id: str,
+    body: ImportReviewDraftCreateRequest,
+):
+    draft_id = generate_id("draft")
+    with get_db_connection() as connection:
+        with connection.cursor() as cursor:
+            _lock_draft_mutation(cursor, batch_id)
+            _lock_review_cluster(cursor, batch_id, cluster_id)
+            _lock_review_assets(
+                cursor,
+                batch_id=batch_id,
+                cluster_id=cluster_id,
+                asset_ids=body.assetIds,
+            )
+            cursor.execute(
+                """
+                INSERT INTO travel_import_review_drafts (
+                    id, batch_id, cluster_id, rating, headline, body, visited_at
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    draft_id,
+                    batch_id,
+                    cluster_id,
+                    body.rating,
+                    body.headline,
+                    body.body,
+                    to_mysql_datetime(body.visitedAt),
+                ),
+            )
+            _replace_review_draft_assets(
+                cursor,
+                draft_id=draft_id,
+                asset_ids=body.assetIds,
+            )
+    _refresh_manifest(batch_id)
+    return get_batch_detail(batch_id)
+
+
+@router.patch("/{batch_id}/reviews/{review_id}")
+async def patch_import_review_draft(
+    batch_id: str,
+    review_id: str,
+    body: ImportReviewDraftPatchRequest,
+):
+    _require_batch(batch_id)
+    values = body.model_dump(exclude_unset=True)
+    if not values:
+        return get_batch_detail(batch_id)
+    with get_db_connection() as connection:
+        with connection.cursor() as cursor:
+            _lock_draft_mutation(cursor, batch_id)
+            cursor.execute(
+                "SELECT * FROM travel_import_review_drafts "
+                "WHERE id = %s AND batch_id = %s AND cluster_id IS NOT NULL "
+                "FOR UPDATE",
+                (review_id, batch_id),
+            )
+            review = cursor.fetchone()
+            if not review:
+                raise HTTPException(
+                    status_code=404, detail="Import review draft not found"
+                )
+            asset_ids = values.pop("assetIds", None)
+            column_map = {
+                "rating": "rating",
+                "headline": "headline",
+                "body": "body",
+                "visitedAt": "visited_at",
+            }
+            if values:
+                clauses = [f"{column_map[field]} = %s" for field in values]
+                parameters = [
+                    to_mysql_datetime(value) if field == "visitedAt" else value
+                    for field, value in values.items()
+                ]
+                cursor.execute(
+                    f"UPDATE travel_import_review_drafts SET {', '.join(clauses)} "
+                    "WHERE id = %s",
+                    (*parameters, review_id),
+                )
+            if asset_ids is not None:
+                _lock_review_assets(
+                    cursor,
+                    batch_id=batch_id,
+                    cluster_id=review["cluster_id"],
+                    asset_ids=asset_ids,
+                )
+                _replace_review_draft_assets(
+                    cursor,
+                    draft_id=review_id,
+                    asset_ids=asset_ids,
+                )
+    _refresh_manifest(batch_id)
+    return get_batch_detail(batch_id)
+
+
+@router.delete("/{batch_id}/reviews/{review_id}")
+async def delete_import_review_draft(batch_id: str, review_id: str):
+    with get_db_connection() as connection:
+        with connection.cursor() as cursor:
+            _lock_draft_mutation(cursor, batch_id)
+            cursor.execute(
+                "DELETE FROM travel_import_review_drafts "
+                "WHERE id = %s AND batch_id = %s AND cluster_id IS NOT NULL",
+                (review_id, batch_id),
+            )
+            if cursor.rowcount == 0:
+                raise HTTPException(
+                    status_code=404, detail="Import review draft not found"
+                )
     _refresh_manifest(batch_id)
     return get_batch_detail(batch_id)
 
@@ -590,7 +731,9 @@ async def merge_import_clusters(batch_id: str, body: ImportClusterMergeRequest):
     _require_batch(batch_id)
     cluster_ids = sorted(set(body.clusterIds))
     if len(cluster_ids) < 2:
-        raise HTTPException(status_code=422, detail="At least two distinct clusters are required")
+        raise HTTPException(
+            status_code=422, detail="At least two distinct clusters are required"
+        )
     with get_db_connection() as connection:
         with connection.cursor() as cursor:
             _lock_draft_mutation(cursor, batch_id)
@@ -602,7 +745,9 @@ async def merge_import_clusters(batch_id: str, body: ImportClusterMergeRequest):
             )
             clusters = cursor.fetchall()
             if len(clusters) != len(cluster_ids):
-                raise HTTPException(status_code=404, detail="One or more clusters were not found")
+                raise HTTPException(
+                    status_code=404, detail="One or more clusters were not found"
+                )
             cursor.execute(
                 f"SELECT id, latitude, longitude FROM travel_import_assets "
                 f"WHERE batch_id = %s AND cluster_id IN ({placeholders})",
@@ -640,7 +785,15 @@ async def merge_import_clusters(batch_id: str, body: ImportClusterMergeRequest):
                 cluster_id=target_id,
                 representative_asset_id=target_representative_id,
             )
-            delete_ids = [cluster_id for cluster_id in cluster_ids if cluster_id != target_id]
+            _move_cluster_review_drafts(
+                cursor,
+                batch_id=batch_id,
+                cluster_ids=cluster_ids,
+                target_cluster_id=target_id,
+            )
+            delete_ids = [
+                cluster_id for cluster_id in cluster_ids if cluster_id != target_id
+            ]
             delete_placeholders = ",".join(["%s"] * len(delete_ids))
             cursor.execute(
                 f"DELETE FROM travel_import_clusters WHERE id IN ({delete_placeholders})",
@@ -672,12 +825,31 @@ async def split_import_cluster(batch_id: str, body: ImportClusterSplitRequest):
             rows = cursor.fetchall()
             row_by_id = {row["id"]: row for row in rows}
             if any(asset_id not in row_by_id for asset_id in selected_ids):
-                raise HTTPException(status_code=422, detail="Split assets must belong to the cluster")
+                raise HTTPException(
+                    status_code=422, detail="Split assets must belong to the cluster"
+                )
             remaining_ids = sorted(set(row_by_id) - set(selected_ids))
             if not remaining_ids:
-                raise HTTPException(status_code=422, detail="Split must leave assets in the original cluster")
-            selected_points = [GeoPoint(row_by_id[item]["id"], row_by_id[item]["latitude"], row_by_id[item]["longitude"]) for item in selected_ids]
-            remaining_points = [GeoPoint(row_by_id[item]["id"], row_by_id[item]["latitude"], row_by_id[item]["longitude"]) for item in remaining_ids]
+                raise HTTPException(
+                    status_code=422,
+                    detail="Split must leave assets in the original cluster",
+                )
+            selected_points = [
+                GeoPoint(
+                    row_by_id[item]["id"],
+                    row_by_id[item]["latitude"],
+                    row_by_id[item]["longitude"],
+                )
+                for item in selected_ids
+            ]
+            remaining_points = [
+                GeoPoint(
+                    row_by_id[item]["id"],
+                    row_by_id[item]["latitude"],
+                    row_by_id[item]["longitude"],
+                )
+                for item in remaining_ids
+            ]
             try:
                 selected_rep = validate_cluster_radius(selected_points)
                 remaining_rep = validate_cluster_radius(remaining_points)
@@ -698,12 +870,21 @@ async def split_import_cluster(batch_id: str, body: ImportClusterSplitRequest):
                           %s, %s, %s, %s, %s, %s, 'create')
                 """,
                 (
-                    new_cluster_id, batch_id, cluster["sort_order"] + 1,
-                    None, selected_rep.latitude, selected_rep.longitude,
-                    cluster.get("country_code"), cluster.get("country"), cluster.get("city"),
-                    cluster.get("address"), cluster.get("suggested_name"),
-                    cluster.get("draft_name"), cluster.get("draft_category"),
-                    cluster.get("draft_address"), cluster.get("draft_description"),
+                    new_cluster_id,
+                    batch_id,
+                    cluster["sort_order"] + 1,
+                    None,
+                    selected_rep.latitude,
+                    selected_rep.longitude,
+                    cluster.get("country_code"),
+                    cluster.get("country"),
+                    cluster.get("city"),
+                    cluster.get("address"),
+                    cluster.get("suggested_name"),
+                    cluster.get("draft_name"),
+                    cluster.get("draft_category"),
+                    cluster.get("draft_address"),
+                    cluster.get("draft_description"),
                     cluster.get("draft_visibility"),
                 ),
             )
@@ -713,6 +894,7 @@ async def split_import_cluster(batch_id: str, body: ImportClusterSplitRequest):
                 f"WHERE id IN ({selected_placeholders})",
                 (new_cluster_id, *selected_ids),
             )
+            detach_review_assets(cursor, asset_ids=selected_ids)
             cursor.execute(
                 "UPDATE travel_import_clusters SET latitude = %s, longitude = %s "
                 "WHERE id = %s",
@@ -751,7 +933,9 @@ async def publish_import_batch(
     if batch["status"] == "published":
         return get_batch_detail(batch_id)
     if batch["status"] == "publishing":
-        raise HTTPException(status_code=409, detail="Import batch is already publishing")
+        raise HTTPException(
+            status_code=409, detail="Import batch is already publishing"
+        )
     validation = _validate_batch(batch_id)
     if not validation["valid"]:
         raise HTTPException(status_code=422, detail=validation)
@@ -817,6 +1001,91 @@ def _lock_draft_mutation(cursor, batch_id: str) -> dict:
         ) from exc
 
 
+def _lock_review_cluster(cursor, batch_id: str, cluster_id: str) -> dict:
+    cursor.execute(
+        "SELECT * FROM travel_import_clusters "
+        "WHERE id = %s AND batch_id = %s FOR UPDATE",
+        (cluster_id, batch_id),
+    )
+    cluster = cursor.fetchone()
+    if not cluster:
+        raise HTTPException(status_code=404, detail="Import cluster not found")
+    return cluster
+
+
+def _lock_review_assets(
+    cursor,
+    *,
+    batch_id: str,
+    cluster_id: str,
+    asset_ids: list[str],
+) -> list[dict]:
+    if not asset_ids:
+        return []
+    placeholders = ",".join(["%s"] * len(asset_ids))
+    cursor.execute(
+        f"SELECT id, captured_at FROM travel_import_assets "
+        f"WHERE batch_id = %s AND cluster_id = %s "
+        f"AND id IN ({placeholders}) FOR UPDATE",
+        (batch_id, cluster_id, *asset_ids),
+    )
+    assets = cursor.fetchall()
+    if {asset["id"] for asset in assets} != set(asset_ids):
+        raise HTTPException(
+            status_code=422,
+            detail="assetIds must belong to this batch and cluster",
+        )
+    return assets
+
+
+def _replace_review_draft_assets(
+    cursor,
+    *,
+    draft_id: str,
+    asset_ids: list[str],
+) -> None:
+    previous_draft_ids = lock_review_draft_ids_for_assets(cursor, asset_ids)
+    cursor.execute(
+        "DELETE FROM travel_import_review_draft_assets WHERE draft_id = %s",
+        (draft_id,),
+    )
+    if asset_ids:
+        cursor.executemany(
+            """
+            INSERT INTO travel_import_review_draft_assets (draft_id, asset_id)
+            VALUES (%s, %s)
+            ON DUPLICATE KEY UPDATE draft_id = VALUES(draft_id)
+            """,
+            [(draft_id, asset_id) for asset_id in asset_ids],
+        )
+        placeholders = ",".join(["%s"] * len(asset_ids))
+        cursor.execute(
+            f"UPDATE travel_import_assets "
+            f"SET role = 'review', excluded = 0, manual_exclusion_reason = NULL "
+            f"WHERE id IN ({placeholders})",
+            tuple(asset_ids),
+        )
+    refresh_review_draft_visited_at(
+        cursor,
+        [draft_id, *previous_draft_ids],
+    )
+
+
+def _move_cluster_review_drafts(
+    cursor,
+    *,
+    batch_id: str,
+    cluster_ids: list[str],
+    target_cluster_id: str,
+) -> None:
+    placeholders = ",".join(["%s"] * len(cluster_ids))
+    cursor.execute(
+        f"UPDATE travel_import_review_drafts SET cluster_id = %s "
+        f"WHERE batch_id = %s AND cluster_id IN ({placeholders})",
+        (target_cluster_id, batch_id, *cluster_ids),
+    )
+
+
 def _require_manageable_place(cursor, place_id: str, user: dict) -> dict:
     cursor.execute("SELECT * FROM travel_places WHERE id = %s", (place_id,))
     place = cursor.fetchone()
@@ -863,8 +1132,11 @@ def _claim_publish_batch(batch_id: str, user: dict) -> bool:
                 """
                 SELECT review.id, review.published_review_id
                 FROM travel_import_review_drafts review
-                JOIN travel_import_assets asset ON asset.id = review.asset_id
-                WHERE review.batch_id = %s AND asset.role = 'review'
+                JOIN travel_import_clusters cluster
+                  ON cluster.id = review.cluster_id
+                 AND cluster.batch_id = review.batch_id
+                WHERE review.batch_id = %s
+                  AND cluster.publish_action <> 'skip'
                   AND review.rating IS NOT NULL
                   AND NULLIF(TRIM(review.body), '') IS NOT NULL
                 FOR UPDATE
@@ -901,31 +1173,67 @@ def _validate_batch(batch_id: str) -> dict:
     errors = []
     warnings = []
     if detail["status"] not in {"ready", "published"}:
-        errors.append({"code": "batch-not-ready", "message": "Processing has not completed"})
+        errors.append(
+            {"code": "batch-not-ready", "message": "Processing has not completed"}
+        )
     asset_by_id = {asset["id"]: asset for asset in detail["assets"]}
     for cluster in detail["clusters"]:
         action = cluster["publishAction"]
         if action == "create":
             if not (cluster["draft"].get("name") or "").strip():
-                errors.append({"code": "missing-place-name", "clusterId": cluster["id"]})
+                errors.append(
+                    {"code": "missing-place-name", "clusterId": cluster["id"]}
+                )
             if not (cluster["draft"].get("category") or "").strip():
-                errors.append({"code": "missing-place-category", "clusterId": cluster["id"]})
+                errors.append(
+                    {"code": "missing-place-category", "clusterId": cluster["id"]}
+                )
         elif action == "merge" and not cluster.get("existingPlaceId"):
             errors.append({"code": "missing-merge-target", "clusterId": cluster["id"]})
-        covers = [asset_id for asset_id in cluster["assetIds"] if asset_by_id[asset_id]["role"] == "cover"]
+        covers = [
+            asset_id
+            for asset_id in cluster["assetIds"]
+            if asset_by_id[asset_id]["role"] == "cover"
+        ]
         if len(covers) > 1:
-            errors.append({"code": "multiple-covers", "clusterId": cluster["id"], "assetIds": covers})
-    for asset in detail["assets"]:
-        if asset["role"] != "review" or asset["excluded"]:
-            continue
-        review = asset.get("review") or {}
+            errors.append(
+                {
+                    "code": "multiple-covers",
+                    "clusterId": cluster["id"],
+                    "assetIds": covers,
+                }
+            )
+    linked_review_asset_ids = {
+        asset_id for review in detail["reviewDrafts"] for asset_id in review["assetIds"]
+    }
+    for review in detail["reviewDrafts"]:
         missing = []
         if review.get("rating") is None:
             missing.append("rating")
         if not (review.get("body") or "").strip():
             missing.append("body")
         if missing:
-            warnings.append({"code": "incomplete-review", "assetId": asset["id"], "missingFields": missing})
+            warnings.append(
+                {
+                    "code": "incomplete-review",
+                    "reviewId": review["id"],
+                    "clusterId": review["clusterId"],
+                    "missingFields": missing,
+                }
+            )
+    for asset in detail["assets"]:
+        if (
+            asset["role"] == "review"
+            and not asset["excluded"]
+            and asset["id"] not in linked_review_asset_ids
+        ):
+            warnings.append(
+                {
+                    "code": "unlinked-review-asset",
+                    "assetId": asset["id"],
+                    "clusterId": asset["clusterId"],
+                }
+            )
     return {"valid": not errors, "errors": errors, "warnings": warnings}
 
 
@@ -948,11 +1256,8 @@ def _publish_batch(batch_id: str, user: dict) -> None:
                     )
                 cursor.execute(
                     """
-                    SELECT asset.*, review.id AS review_id, review.rating,
-                           review.headline, review.body, review.visited_at,
-                           review.published_review_id
+                    SELECT asset.*
                     FROM travel_import_assets asset
-                    LEFT JOIN travel_import_review_drafts review ON review.asset_id = asset.id
                     WHERE asset.cluster_id = %s AND asset.excluded = 0
                       AND asset.role IN ('cover', 'gallery', 'review')
                     ORDER BY asset.captured_at ASC, asset.created_at ASC, asset.id ASC
@@ -975,7 +1280,9 @@ def _publish_batch(batch_id: str, user: dict) -> None:
                     place_address = (
                         cluster.get("draft_address") or cluster.get("address") or ""
                     )[:500] or None
-                    cursor.execute("SELECT id FROM travel_places WHERE id = %s", (place_id,))
+                    cursor.execute(
+                        "SELECT id FROM travel_places WHERE id = %s", (place_id,)
+                    )
                     if not cursor.fetchone():
                         cursor.execute(
                             """
@@ -989,14 +1296,20 @@ def _publish_batch(batch_id: str, user: dict) -> None:
                                       %s, %s, '[]', %s, %s, %s, %s, %s)
                             """,
                             (
-                                place_id, cluster["draft_name"], cluster["draft_category"],
-                                cluster["latitude"], cluster["longitude"],
+                                place_id,
+                                cluster["draft_name"],
+                                cluster["draft_category"],
+                                cluster["latitude"],
+                                cluster["longitude"],
                                 place_address,
                                 cluster.get("draft_description"),
                                 cover_media_id,
                                 dump_json(photo_media_ids),
-                                user["account_id"], user["login_id"], user["name"],
-                                user.get("email"), cluster.get("draft_visibility") or "public",
+                                user["account_id"],
+                                user["login_id"],
+                                user["name"],
+                                user.get("email"),
+                                cluster.get("draft_visibility") or "public",
                             ),
                         )
                 else:
@@ -1012,18 +1325,42 @@ def _publish_batch(batch_id: str, user: dict) -> None:
                         "cover_media_id = COALESCE(cover_media_id, %s) WHERE id = %s",
                         (dump_json(merged_media_ids), cover_media_id, place_id),
                     )
-                for asset in assets:
-                    if asset["role"] != "review":
-                        continue
-                    if asset.get("rating") is None or not (asset.get("body") or "").strip():
-                        continue
-                    review_id = asset.get("published_review_id")
+                cursor.execute(
+                    """
+                    SELECT *
+                    FROM travel_import_review_drafts
+                    WHERE batch_id = %s AND cluster_id = %s
+                      AND rating IS NOT NULL
+                      AND NULLIF(TRIM(body), '') IS NOT NULL
+                    ORDER BY created_at, id
+                    """,
+                    (batch_id, cluster["id"]),
+                )
+                review_drafts = cursor.fetchall()
+                for review in review_drafts:
+                    cursor.execute(
+                        "SELECT asset_id FROM travel_import_review_draft_assets "
+                        "WHERE draft_id = %s ORDER BY created_at, asset_id",
+                        (review["id"],),
+                    )
+                    review_asset_ids = [row["asset_id"] for row in cursor.fetchall()]
+                    review_media_ids = list(
+                        dict.fromkeys(
+                            final_media_by_asset[asset_id]
+                            for asset_id in review_asset_ids
+                            if asset_id in final_media_by_asset
+                        )
+                    )
+                    review_id = review.get("published_review_id")
                     if not review_id:
                         raise HTTPException(
                             status_code=409,
-                            detail=f"Review reservation is missing for asset {asset['id']}",
+                            detail=f"Review reservation is missing for draft {review['id']}",
                         )
-                    cursor.execute("SELECT id FROM travel_place_reviews WHERE id = %s", (review_id,))
+                    cursor.execute(
+                        "SELECT id FROM travel_place_reviews WHERE id = %s",
+                        (review_id,),
+                    )
                     if not cursor.fetchone():
                         cursor.execute(
                             """
@@ -1036,16 +1373,23 @@ def _publish_batch(batch_id: str, user: dict) -> None:
                                       %s, %s, %s, %s)
                             """,
                             (
-                                review_id, place_id, asset["rating"], asset.get("headline"),
-                                asset["body"], asset.get("visited_at"),
-                                dump_json([final_media_by_asset[asset["id"]]]),
-                                user["account_id"], user["login_id"], user["name"],
+                                review_id,
+                                place_id,
+                                review["rating"],
+                                review.get("headline"),
+                                review["body"],
+                                review.get("visited_at"),
+                                dump_json(review_media_ids),
+                                user["account_id"],
+                                user["login_id"],
+                                user["name"],
                                 user.get("email"),
                             ),
                         )
                     cursor.execute(
-                        "UPDATE travel_import_review_drafts SET published_review_id = %s WHERE asset_id = %s",
-                        (review_id, asset["id"]),
+                        "UPDATE travel_import_review_drafts "
+                        "SET published_review_id = %s WHERE id = %s",
+                        (review_id, review["id"]),
                     )
                 cursor.execute(
                     "UPDATE travel_import_clusters SET published_place_id = %s WHERE id = %s",
@@ -1064,9 +1408,7 @@ def _select_publish_cover_asset_id(assets: list[dict]) -> str | None:
     )
     if explicit_cover:
         return explicit_cover
-    return next(
-        (asset["id"] for asset in assets if asset["role"] == "gallery"), None
-    )
+    return next((asset["id"] for asset in assets if asset["role"] == "gallery"), None)
 
 
 def _publish_asset_file(
@@ -1082,7 +1424,9 @@ def _publish_asset_file(
             root = import_local_root()
             source = Path(asset["local_source_path"])
         if root is None:
-            raise HTTPException(status_code=409, detail="Local import root is unavailable")
+            raise HTTPException(
+                status_code=409, detail="Local import root is unavailable"
+            )
         try:
             with open_confined_file(root, source) as file_obj:
                 upload_fileobj_to_key(
@@ -1092,12 +1436,15 @@ def _publish_asset_file(
                 )
         except (OSError, ValueError) as exc:
             raise HTTPException(
-                status_code=409, detail=f"Asset source is unsafe or missing: {asset['id']}"
+                status_code=409,
+                detail=f"Asset source is unsafe or missing: {asset['id']}",
             ) from exc
     else:
         source_key = asset.get("organized_path") or asset.get("staging_key")
         if not source_key:
-            raise HTTPException(status_code=409, detail=f"Asset source is missing: {asset['id']}")
+            raise HTTPException(
+                status_code=409, detail=f"Asset source is missing: {asset['id']}"
+            )
         copy_object(source_key, key)
     return register_attached_object(
         cursor,
@@ -1118,40 +1465,50 @@ def _stream_confined_file(root: Path, path: Path):
 def _refresh_manifest(batch_id: str) -> None:
     with get_db_connection() as connection:
         with connection.cursor() as cursor:
-            cursor.execute("SELECT * FROM travel_import_batches WHERE id = %s", (batch_id,))
+            cursor.execute(
+                "SELECT * FROM travel_import_batches WHERE id = %s", (batch_id,)
+            )
             batch = cursor.fetchone()
             if not batch:
                 return
             cursor.execute(
-                """
-                SELECT asset.*, review.rating, review.headline, review.body,
-                       review.visited_at, review.published_review_id
-                FROM travel_import_assets asset
-                LEFT JOIN travel_import_review_drafts review
-                  ON review.asset_id = asset.id
-                WHERE asset.batch_id = %s
-                """,
+                "SELECT * FROM travel_import_assets WHERE batch_id = %s",
                 (batch_id,),
             )
             assets = cursor.fetchall()
-            for asset in assets:
-                if asset.get("rating") is not None or asset.get("body") is not None:
-                    asset["review"] = {
-                        "rating": asset.get("rating"),
-                        "headline": asset.get("headline"),
-                        "body": asset.get("body"),
-                        "visitedAt": (
-                            asset["visited_at"].isoformat()
-                            if asset.get("visited_at")
-                            else None
-                        ),
-                        "publishedReviewId": asset.get("published_review_id"),
-                    }
-            cursor.execute("SELECT * FROM travel_import_clusters WHERE batch_id = %s", (batch_id,))
+            cursor.execute(
+                "SELECT * FROM travel_import_clusters WHERE batch_id = %s", (batch_id,)
+            )
             clusters = cursor.fetchall()
             for cluster in clusters:
-                cluster["asset_ids"] = [asset["id"] for asset in assets if asset.get("cluster_id") == cluster["id"]]
-            manifest = build_manifest(batch, assets, clusters)
+                cluster["asset_ids"] = [
+                    asset["id"]
+                    for asset in assets
+                    if asset.get("cluster_id") == cluster["id"]
+                ]
+            cursor.execute(
+                "SELECT * FROM travel_import_review_drafts "
+                "WHERE batch_id = %s AND cluster_id IS NOT NULL",
+                (batch_id,),
+            )
+            review_drafts = cursor.fetchall()
+            cursor.execute(
+                """
+                SELECT link.draft_id, link.asset_id
+                FROM travel_import_review_draft_assets link
+                JOIN travel_import_review_drafts review ON review.id = link.draft_id
+                WHERE review.batch_id = %s
+                """,
+                (batch_id,),
+            )
+            review_asset_ids: dict[str, list[str]] = {}
+            for link in cursor.fetchall():
+                review_asset_ids.setdefault(link["draft_id"], []).append(
+                    link["asset_id"]
+                )
+            for review in review_drafts:
+                review["asset_ids"] = review_asset_ids.get(review["id"], [])
+            manifest = build_manifest(batch, assets, clusters, review_drafts)
             cursor.execute(
                 "UPDATE travel_import_batches SET manifest_json = %s WHERE id = %s",
                 (json.dumps(manifest, ensure_ascii=False), batch_id),
