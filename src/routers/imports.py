@@ -628,6 +628,13 @@ async def create_import_cluster(
             category=body.category,
             address=body.address,
             description=body.description,
+            opening_hours=(
+                body.openingHours
+                if body.openingHours is not None
+                else location["resolved_opening_hours"]
+            ),
+            special_notes=body.specialNotes,
+            tags=body.tags,
             visibility=body.visibility,
             map_link=location["map_link"],
             publish_action=body.publishAction,
@@ -663,6 +670,9 @@ async def patch_import_cluster(
         "category": "draft_category",
         "address": "draft_address",
         "description": "draft_description",
+        "openingHours": "draft_opening_hours",
+        "specialNotes": "draft_special_notes",
+        "tags": "draft_tags_json",
         "visibility": "draft_visibility",
         "publishAction": "publish_action",
         "existingPlaceId": "existing_place_id",
@@ -713,7 +723,14 @@ async def patch_import_cluster(
                 cursor.execute(
                     f"UPDATE travel_import_clusters SET {', '.join(clauses)} "
                     "WHERE id = %s AND batch_id = %s",
-                    (*values.values(), cluster_id, batch_id),
+                    (
+                        *(
+                            dump_json(value) if field == "tags" and value is not None else value
+                            for field, value in values.items()
+                        ),
+                        cluster_id,
+                        batch_id,
+                    ),
                 )
             if representative_was_set:
                 synchronize_cluster_representative(
@@ -865,9 +882,10 @@ async def split_import_cluster(batch_id: str, body: ImportClusterSplitRequest):
                     id, batch_id, sort_order, representative_asset_id,
                     latitude, longitude, country_code, country, city, address,
                     suggested_name, draft_name, draft_category, draft_address,
-                    draft_description, draft_visibility, publish_action
+                    draft_description, draft_opening_hours, draft_special_notes,
+                    draft_tags_json, draft_visibility, publish_action
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                          %s, %s, %s, %s, %s, %s, 'create')
+                          %s, %s, %s, %s, %s, %s, %s, %s, %s, 'create')
                 """,
                 (
                     new_cluster_id,
@@ -885,6 +903,9 @@ async def split_import_cluster(batch_id: str, body: ImportClusterSplitRequest):
                     cluster.get("draft_category"),
                     cluster.get("draft_address"),
                     cluster.get("draft_description"),
+                    cluster.get("draft_opening_hours"),
+                    cluster.get("draft_special_notes"),
+                    cluster.get("draft_tags_json"),
                     cluster.get("draft_visibility"),
                 ),
             )
@@ -969,6 +990,7 @@ async def _resolve_new_cluster_location(
             "map_link": None,
             "suggested_name": None,
             "resolved_address": None,
+            "resolved_opening_hours": None,
         }
     try:
         result = await resolve_supported_place_link(
@@ -986,6 +1008,7 @@ async def _resolve_new_cluster_location(
         "map_link": result.resolved_url,
         "suggested_name": result.name,
         "resolved_address": result.address,
+        "resolved_opening_hours": result.opening_hours,
     }
 
 
@@ -1271,7 +1294,14 @@ def _publish_batch(batch_id: str, user: dict) -> None:
                     )
                     for asset in assets
                 }
-                photo_media_ids = list(dict.fromkeys(final_media_by_asset.values()))
+                place_assets = [
+                    asset for asset in assets if asset["role"] in {"cover", "gallery"}
+                ]
+                photo_media_ids = list(
+                    dict.fromkeys(
+                        final_media_by_asset[asset["id"]] for asset in place_assets
+                    )
+                )
                 cover_asset_id = _select_publish_cover_asset_id(assets)
                 cover_media_id = (
                     final_media_by_asset[cover_asset_id] if cover_asset_id else None
@@ -1288,12 +1318,14 @@ def _publish_batch(batch_id: str, user: dict) -> None:
                             """
                             INSERT INTO travel_places (
                                 id, name, category, latitude, longitude, address,
-                                description, cover_image_url, photo_urls_json,
+                                description, opening_hours, special_notes,
+                                cover_image_url, photo_urls_json,
                                 cover_media_id, photo_media_ids_json, tags_json,
                                 owner_account_id, owner_login_id, owner_name, owner_email,
                                 visibility
-                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, NULL, '[]',
-                                      %s, %s, '[]', %s, %s, %s, %s, %s)
+                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
+                                      NULL, '[]', %s, %s, %s,
+                                      %s, %s, %s, %s, %s)
                             """,
                             (
                                 place_id,
@@ -1303,8 +1335,11 @@ def _publish_batch(batch_id: str, user: dict) -> None:
                                 cluster["longitude"],
                                 place_address,
                                 cluster.get("draft_description"),
+                                cluster.get("draft_opening_hours"),
+                                cluster.get("draft_special_notes"),
                                 cover_media_id,
                                 dump_json(photo_media_ids),
+                                cluster.get("draft_tags_json") or "[]",
                                 user["account_id"],
                                 user["login_id"],
                                 user["name"],
@@ -1322,8 +1357,18 @@ def _publish_batch(batch_id: str, user: dict) -> None:
                     )
                     cursor.execute(
                         "UPDATE travel_places SET photo_media_ids_json = %s, "
-                        "cover_media_id = COALESCE(cover_media_id, %s) WHERE id = %s",
-                        (dump_json(merged_media_ids), cover_media_id, place_id),
+                        "cover_media_id = COALESCE(cover_media_id, %s), "
+                        "opening_hours = COALESCE(%s, opening_hours), "
+                        "special_notes = COALESCE(%s, special_notes), "
+                        "tags_json = COALESCE(%s, tags_json) WHERE id = %s",
+                        (
+                            dump_json(merged_media_ids),
+                            cover_media_id,
+                            cluster.get("draft_opening_hours"),
+                            cluster.get("draft_special_notes"),
+                            cluster.get("draft_tags_json"),
+                            place_id,
+                        ),
                     )
                 cursor.execute(
                     """

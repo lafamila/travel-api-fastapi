@@ -80,6 +80,9 @@ class ImportClusterDraftPatchRequest(BaseModel):
     category: TravelPlaceCategory | None = None
     address: str | None = Field(default=None, max_length=500)
     description: str | None = Field(default=None, max_length=65535)
+    openingHours: str | None = Field(default=None, max_length=65535)
+    specialNotes: str | None = Field(default=None, max_length=65535)
+    tags: list[str] | None = None
     visibility: Literal["public", "private"] | None = None
     publishAction: ImportPublishAction | None = None
     existingPlaceId: str | None = Field(default=None, max_length=50)

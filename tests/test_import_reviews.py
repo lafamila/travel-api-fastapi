@@ -499,6 +499,12 @@ class ImportReviewPublishTests(unittest.TestCase):
             ["media-asset-1", "media-asset-2"],
         )
         self.assertEqual(review_inserts[0].args[1][0], "review-1")
+        place_insert = next(
+            call
+            for call in cursor.execute.call_args_list
+            if "INSERT INTO travel_places" in call.args[0]
+        )
+        self.assertEqual(json.loads(place_insert.args[1][10]), [])
         self.assertTrue(
             any(
                 call.args[1] == ("review-1", "draft-1")

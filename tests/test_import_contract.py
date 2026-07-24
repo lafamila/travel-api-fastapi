@@ -249,6 +249,9 @@ class ImportManifestTests(unittest.TestCase):
                     "latitude": 37.0,
                     "longitude": 127.0,
                     "publish_action": "create",
+                    "draft_opening_hours": "Daily 09:00-18:00",
+                    "draft_special_notes": "Bring cash",
+                    "draft_tags_json": '["market", "local"]',
                     "asset_ids": ["asset-1"],
                 }
             ],
@@ -271,6 +274,14 @@ class ImportManifestTests(unittest.TestCase):
         self.assertEqual(manifest["version"], "travel-import.v1")
         self.assertEqual(manifest["batch"]["oldestCapturedAt"], "2020-01-02T03:04:05")
         self.assertEqual(manifest["clusters"][0]["assetIds"], ["asset-1"])
+        self.assertEqual(
+            manifest["clusters"][0]["draft"]["openingHours"],
+            "Daily 09:00-18:00",
+        )
+        self.assertEqual(manifest["clusters"][0]["draft"]["specialNotes"], "Bring cash")
+        self.assertEqual(
+            manifest["clusters"][0]["draft"]["tags"], ["market", "local"]
+        )
         self.assertNotIn("review", manifest["assets"][0])
         self.assertEqual(manifest["reviewDrafts"][0]["assetIds"], ["asset-1"])
         self.assertEqual(manifest["reviewDrafts"][0]["clusterId"], "cluster-1")

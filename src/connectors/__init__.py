@@ -377,6 +377,9 @@ def _create_import_tables(cursor) -> None:
             draft_category VARCHAR(50) NULL,
             draft_address VARCHAR(1000) NULL,
             draft_description TEXT NULL,
+            draft_opening_hours TEXT NULL,
+            draft_special_notes TEXT NULL,
+            draft_tags_json TEXT NULL,
             draft_visibility VARCHAR(20) NULL DEFAULT 'public',
             map_link VARCHAR(2000) NULL,
             publish_action VARCHAR(20) NOT NULL DEFAULT 'create',
@@ -549,6 +552,24 @@ def _extend_import_tables(cursor) -> None:
         "travel_import_clusters",
         "map_link",
         "VARCHAR(2000) NULL",
+    )
+    _ensure_column(
+        cursor,
+        "travel_import_clusters",
+        "draft_opening_hours",
+        "TEXT NULL",
+    )
+    _ensure_column(
+        cursor,
+        "travel_import_clusters",
+        "draft_special_notes",
+        "TEXT NULL",
+    )
+    _ensure_column(
+        cursor,
+        "travel_import_clusters",
+        "draft_tags_json",
+        "TEXT NULL",
     )
     _ensure_column(
         cursor,

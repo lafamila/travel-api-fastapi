@@ -13,6 +13,8 @@ from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Iterable
 
+from ..utils import parse_json_list
+
 MANIFEST_VERSION = "travel-import.v1"
 CLUSTER_RADIUS_METERS = 100.0
 
@@ -366,6 +368,9 @@ def build_manifest(
                     "category": cluster.get("draft_category"),
                     "address": cluster.get("draft_address"),
                     "description": cluster.get("draft_description"),
+                    "openingHours": cluster.get("draft_opening_hours"),
+                    "specialNotes": cluster.get("draft_special_notes"),
+                    "tags": parse_json_list(cluster.get("draft_tags_json")),
                     "visibility": cluster.get("draft_visibility"),
                 },
                 "assetIds": sorted(cluster.get("asset_ids", [])),

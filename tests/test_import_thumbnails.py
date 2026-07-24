@@ -59,6 +59,9 @@ class ImportThumbnailSchemaTests(unittest.TestCase):
             ("travel_import_assets", "thumbnail_key"),
             ("travel_import_assets", "manual_exclusion_reason"),
             ("travel_import_clusters", "map_link"),
+            ("travel_import_clusters", "draft_opening_hours"),
+            ("travel_import_clusters", "draft_special_notes"),
+            ("travel_import_clusters", "draft_tags_json"),
             ("travel_import_review_drafts", "cluster_id"),
         }
         cursor = _SchemaCursor(
@@ -75,6 +78,9 @@ class ImportThumbnailSchemaTests(unittest.TestCase):
             {
                 ("travel_import_assets", "manual_exclusion_reason"),
                 ("travel_import_clusters", "map_link"),
+                ("travel_import_clusters", "draft_opening_hours"),
+                ("travel_import_clusters", "draft_special_notes"),
+                ("travel_import_clusters", "draft_tags_json"),
                 ("travel_import_review_drafts", "cluster_id"),
             },
             nullable_columns={("travel_import_review_drafts", "asset_id")},
@@ -92,6 +98,9 @@ class ImportThumbnailSchemaTests(unittest.TestCase):
                 ("travel_import_assets", "thumbnail_key"),
                 ("travel_import_assets", "manual_exclusion_reason"),
                 ("travel_import_clusters", "map_link"),
+                ("travel_import_clusters", "draft_opening_hours"),
+                ("travel_import_clusters", "draft_special_notes"),
+                ("travel_import_clusters", "draft_tags_json"),
             },
             existing_indexes={
                 ("travel_import_review_drafts", "uq_import_review_batch_cluster")
@@ -119,6 +128,33 @@ class ImportThumbnailSchemaTests(unittest.TestCase):
         )
         self.assertIn("ON DUPLICATE KEY UPDATE draft_id = VALUES(draft_id)", statements)
         self.assertIn("DROP INDEX `uq_import_review_batch_cluster`", statements)
+
+    def test_cluster_draft_columns_are_added_idempotently(self) -> None:
+        cursor = _SchemaCursor(
+            {
+                ("travel_import_assets", "thumbnail_key"),
+                ("travel_import_assets", "manual_exclusion_reason"),
+                ("travel_import_clusters", "map_link"),
+                ("travel_import_review_drafts", "cluster_id"),
+            },
+            nullable_columns={("travel_import_review_drafts", "asset_id")},
+        )
+
+        _extend_import_tables(cursor)
+
+        statements = "\n".join(cursor.statements)
+        self.assertIn(
+            "ADD COLUMN `draft_opening_hours` TEXT NULL",
+            statements,
+        )
+        self.assertIn(
+            "ADD COLUMN `draft_special_notes` TEXT NULL",
+            statements,
+        )
+        self.assertIn(
+            "ADD COLUMN `draft_tags_json` TEXT NULL",
+            statements,
+        )
 
 
 class ImportThumbnailProcessorTests(unittest.TestCase):

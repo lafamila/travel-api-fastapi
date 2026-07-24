@@ -30,7 +30,7 @@ from src.services.import_cluster_assignments import (
     unassign_assets,
 )
 from src.services.import_processor import ImportProcessor
-from src.services.import_repository import _map_asset
+from src.services.import_repository import _map_asset, _map_cluster
 from src.services.place_links import PlaceLinkError, PlaceLinkResult
 
 
@@ -73,6 +73,34 @@ class ImportClusterRequestValidationTests(unittest.TestCase):
                 latitude=37.5,
                 longitude=127.0,
             )
+
+    def test_cluster_draft_accepts_place_detail_fields(self) -> None:
+        draft = ImportClusterDraftPatchRequest(
+            openingHours="Daily 09:00-18:00",
+            specialNotes="Closed on holidays",
+            tags=["museum", "indoor"],
+        )
+
+        self.assertEqual(draft.openingHours, "Daily 09:00-18:00")
+        self.assertEqual(draft.specialNotes, "Closed on holidays")
+        self.assertEqual(draft.tags, ["museum", "indoor"])
+
+    def test_cluster_repository_maps_place_detail_fields(self) -> None:
+        cluster = _map_cluster(
+            {
+                "id": "cluster-1",
+                "latitude": 37.5,
+                "longitude": 127.0,
+                "draft_opening_hours": "Daily 09:00-18:00",
+                "draft_special_notes": "Closed on holidays",
+                "draft_tags_json": '["museum", "indoor"]',
+            },
+            ["asset-1"],
+        )
+
+        self.assertEqual(cluster["draft"]["openingHours"], "Daily 09:00-18:00")
+        self.assertEqual(cluster["draft"]["specialNotes"], "Closed on holidays")
+        self.assertEqual(cluster["draft"]["tags"], ["museum", "indoor"])
 
 
 class ImportClusterLocationTests(unittest.IsolatedAsyncioTestCase):
@@ -168,6 +196,9 @@ class ImportAssignmentTransactionTests(unittest.TestCase):
                 category="other",
                 address=None,
                 description=None,
+                opening_hours=None,
+                special_notes=None,
+                tags=None,
                 visibility="public",
                 map_link=None,
                 publish_action="create",
@@ -320,6 +351,9 @@ class ImportAssignmentTransactionTests(unittest.TestCase):
                 category="other",
                 address=None,
                 description=None,
+                opening_hours=None,
+                special_notes=None,
+                tags=None,
                 visibility="public",
                 map_link=None,
                 publish_action="create",
@@ -368,6 +402,9 @@ class ImportAssignmentTransactionTests(unittest.TestCase):
             category=None,
             address=None,
             description=None,
+            opening_hours="Daily 09:00-18:00",
+            special_notes="Closed on holidays",
+            tags=["museum", "indoor"],
             visibility="public",
             map_link=None,
             publish_action="create",
@@ -384,6 +421,14 @@ class ImportAssignmentTransactionTests(unittest.TestCase):
             if "SET representative_asset_id = %s" in call.args[0]
         )
         self.assertEqual(representative_update.args[1][0], "asset-cover")
+        cluster_insert = next(
+            call
+            for call in cursor.execute.call_args_list
+            if "INSERT INTO travel_import_clusters" in call.args[0]
+        )
+        self.assertEqual(cluster_insert.args[1][12], "Daily 09:00-18:00")
+        self.assertEqual(cluster_insert.args[1][13], "Closed on holidays")
+        self.assertEqual(cluster_insert.args[1][14], '["museum", "indoor"]')
 
 
 class ImportCoverAndClusteringTests(unittest.IsolatedAsyncioTestCase):
@@ -493,6 +538,52 @@ class ImportCoverAndClusteringTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ImportRepresentativePatchTests(unittest.IsolatedAsyncioTestCase):
+    @patch("src.routers.imports._require_batch")
+    @patch("src.routers.imports.get_batch_detail", return_value={"id": "batch-1"})
+    @patch("src.routers.imports._refresh_manifest")
+    @patch("src.routers.imports._lock_draft_mutation")
+    @patch("src.routers.imports.get_db_connection")
+    async def test_patch_persists_place_detail_fields(
+        self,
+        get_db_connection: MagicMock,
+        _lock_draft_mutation: MagicMock,
+        _refresh_manifest: MagicMock,
+        _get_batch_detail: MagicMock,
+        _require_batch: MagicMock,
+    ) -> None:
+        cursor = _mock_connection(get_db_connection)
+        cursor.fetchone.return_value = {
+            "publish_action": "create",
+            "existing_place_id": None,
+        }
+
+        await patch_import_cluster(
+            "batch-1",
+            "cluster-1",
+            ImportClusterDraftPatchRequest(
+                openingHours="Daily 09:00-18:00",
+                specialNotes="Closed on holidays",
+                tags=["museum", "indoor"],
+            ),
+            user={"account_id": "admin"},
+        )
+
+        update = next(
+            call
+            for call in cursor.execute.call_args_list
+            if "UPDATE travel_import_clusters SET draft_opening_hours" in call.args[0]
+        )
+        self.assertEqual(
+            update.args[1],
+            (
+                "Daily 09:00-18:00",
+                "Closed on holidays",
+                '["museum", "indoor"]',
+                "cluster-1",
+                "batch-1",
+            ),
+        )
+
     @patch("src.routers.imports._require_batch")
     @patch("src.routers.imports.get_batch_detail", return_value={"id": "batch-1"})
     @patch("src.routers.imports._refresh_manifest")
@@ -799,6 +890,9 @@ class ImportPublishCoverTests(unittest.TestCase):
                     "draft_address": None,
                     "address": None,
                     "draft_description": None,
+                    "draft_opening_hours": "Daily 09:00-18:00",
+                    "draft_special_notes": "Last entry 17:30",
+                    "draft_tags_json": '["museum", "indoor"]',
                     "draft_visibility": "public",
                 }
             ],
@@ -838,8 +932,70 @@ class ImportPublishCoverTests(unittest.TestCase):
             if "INSERT INTO travel_places" in call.args[0]
         )
         self.assertEqual(
-            place_insert.args[1][7],
+            place_insert.args[1][9],
             "media-gallery-first",
+        )
+        self.assertEqual(place_insert.args[1][7], "Daily 09:00-18:00")
+        self.assertEqual(place_insert.args[1][8], "Last entry 17:30")
+        self.assertEqual(place_insert.args[1][11], '["museum", "indoor"]')
+
+    @patch("src.routers.imports._publish_asset_file")
+    @patch("src.routers.imports.get_db_connection")
+    def test_merge_publishes_draft_details_and_only_place_role_media(
+        self, get_db_connection: MagicMock, publish_asset_file: MagicMock
+    ) -> None:
+        cursor = _mock_connection(get_db_connection)
+        cursor.fetchall.side_effect = [
+            [
+                {
+                    "id": "cluster-1",
+                    "publish_action": "merge",
+                    "published_place_id": "place-1",
+                    "draft_opening_hours": "Weekdays 10:00-20:00",
+                    "draft_special_notes": "Reservation required",
+                    "draft_tags_json": '["night-view"]',
+                }
+            ],
+            [
+                {"id": "gallery-1", "role": "gallery"},
+                {"id": "review-1", "role": "review"},
+            ],
+            [],
+        ]
+        cursor.fetchone.return_value = {
+            "id": "place-1",
+            "owner_account_id": "admin-1",
+            "photo_media_ids_json": '["media-existing"]',
+        }
+        publish_asset_file.side_effect = lambda _cursor, _place_id, asset, _owner_id: (
+            f"media-{asset['id']}"
+        )
+
+        _publish_batch(
+            "batch-1",
+            {
+                "account_id": "admin-1",
+                "login_id": "admin",
+                "name": "Admin",
+                "email": "admin@example.com",
+            },
+        )
+
+        place_update = next(
+            call
+            for call in cursor.execute.call_args_list
+            if "UPDATE travel_places SET photo_media_ids_json" in call.args[0]
+        )
+        self.assertEqual(
+            place_update.args[1],
+            (
+                '["media-existing", "media-gallery-1"]',
+                "media-gallery-1",
+                "Weekdays 10:00-20:00",
+                "Reservation required",
+                '["night-view"]',
+                "place-1",
+            ),
         )
 
     def test_publish_falls_back_to_first_ordered_gallery_without_mutating_role(

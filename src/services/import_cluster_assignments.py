@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..connectors import get_db_connection
-from ..utils import generate_id
+from ..utils import dump_json, generate_id
 from .authorization import can_manage_place
 from .import_repository import lock_mutable_batch
 from .import_review_drafts import detach_review_assets
@@ -95,6 +95,9 @@ def create_cluster_with_assets(
     category: str | None,
     address: str | None,
     description: str | None,
+    opening_hours: str | None,
+    special_notes: str | None,
+    tags: list[str] | None,
     visibility: str | None,
     map_link: str | None,
     publish_action: str | None,
@@ -156,9 +159,10 @@ def create_cluster_with_assets(
                     id, batch_id, sort_order, representative_asset_id,
                     latitude, longitude, address, suggested_name,
                     draft_name, draft_category, draft_address, draft_description,
+                    draft_opening_hours, draft_special_notes, draft_tags_json,
                     draft_visibility, map_link, publish_action, existing_place_id
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s,
-                          %s, %s, %s, %s, %s, %s, %s, %s)
+                          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     cluster_id,
@@ -173,6 +177,9 @@ def create_cluster_with_assets(
                     category,
                     address,
                     description,
+                    opening_hours,
+                    special_notes,
+                    dump_json(tags) if tags is not None else None,
                     visibility or "public",
                     map_link,
                     effective_action,

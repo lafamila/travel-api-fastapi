@@ -88,10 +88,18 @@ def _map_review(row: dict, cursor) -> TravelReview:
 
 
 def _map_place(
-    row: dict, cursor, reviews: list[TravelReview] | None = None
+    row: dict,
+    cursor,
+    reviews: list[TravelReview] | None = None,
+    review_media_ids: set[str] | None = None,
 ) -> TravelPlace:
     cover_media_id = row.get("cover_media_id")
-    photo_media_ids = parse_json_list(row.get("photo_media_ids_json"))
+    excluded_media_ids = review_media_ids or set()
+    photo_media_ids = [
+        media_id
+        for media_id in parse_json_list(row.get("photo_media_ids_json"))
+        if media_id not in excluded_media_ids
+    ]
     external_photo_urls = parse_json_list(row.get("photo_urls_json"))
     cover_media_urls = (
         resolve_media_urls(cursor, [cover_media_id]) if cover_media_id else []
@@ -124,6 +132,26 @@ def _map_place(
         updatedAt=row["updated_at"].isoformat(),
         reviews=reviews or [],
     )
+
+
+def _review_media_ids_by_place(cursor, place_ids: list[str]) -> dict[str, set[str]]:
+    if not place_ids:
+        return {}
+    placeholders = ",".join(["%s"] * len(place_ids))
+    cursor.execute(
+        f"""
+        SELECT place_id, photo_media_ids_json
+        FROM travel_place_reviews
+        WHERE place_id IN ({placeholders})
+        """,
+        tuple(place_ids),
+    )
+    result: dict[str, set[str]] = {}
+    for review in cursor.fetchall():
+        result.setdefault(review["place_id"], set()).update(
+            parse_json_list(review.get("photo_media_ids_json"))
+        )
+    return result
 
 
 def _fetch_place_row(cursor, place_id: str, user: dict) -> dict:
@@ -183,7 +211,18 @@ async def get_places(
                 """,
                 values,
             )
-            return [_map_place(row, cursor) for row in cursor.fetchall()]
+            rows = cursor.fetchall()
+            review_media_ids = _review_media_ids_by_place(
+                cursor, [row["id"] for row in rows]
+            )
+            return [
+                _map_place(
+                    row,
+                    cursor,
+                    review_media_ids=review_media_ids.get(row["id"], set()),
+                )
+                for row in rows
+            ]
 
 
 @router.post("", response_model=TravelPlace, status_code=status.HTTP_201_CREATED)
@@ -323,7 +362,15 @@ async def get_place(
                 (place_id,),
             )
             reviews = [_map_review(review, cursor) for review in cursor.fetchall()]
-            return _map_place(row, cursor, reviews)
+            review_media_ids = {
+                media_id for review in reviews for media_id in review.photoMediaIds
+            }
+            return _map_place(
+                row,
+                cursor,
+                reviews,
+                review_media_ids=review_media_ids,
+            )
 
 
 @router.put("/{place_id}", response_model=TravelPlace)
