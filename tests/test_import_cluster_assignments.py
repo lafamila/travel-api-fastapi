@@ -27,6 +27,7 @@ from src.services.import_cluster_assignments import (
     ImportAssignmentError,
     assign_assets_to_cluster,
     create_cluster_with_assets,
+    create_reassignment_cluster,
     unassign_assets,
 )
 from src.services.import_processor import ImportProcessor
@@ -310,6 +311,86 @@ class ImportAssignmentTransactionTests(unittest.TestCase):
         self.assertNotIn("role", update.args[0])
         self.assertNotIn("review", update.args[0])
         self.assertEqual(update.args[1], ("batch-1", "asset-1"))
+
+    @patch(
+        "src.services.import_cluster_assignments.generate_id",
+        return_value="cluster-new",
+    )
+    @patch("src.services.import_cluster_assignments.lock_mutable_batch")
+    @patch("src.services.import_cluster_assignments.get_db_connection")
+    def test_reassignment_cluster_uses_selected_asset_coordinate_center(
+        self,
+        get_db_connection: MagicMock,
+        _lock_mutable_batch: MagicMock,
+        _generate_id: MagicMock,
+    ) -> None:
+        cursor = _mock_connection(get_db_connection)
+        cursor.fetchall.return_value = [
+            {
+                "id": "asset-1",
+                "cluster_id": "cluster-old",
+                "role": "gallery",
+                "latitude": 37.5,
+                "longitude": 127.0,
+            },
+            {
+                "id": "asset-2",
+                "cluster_id": "cluster-old",
+                "role": "gallery",
+                "latitude": 37.6,
+                "longitude": 127.2,
+            },
+        ]
+        cursor.fetchone.return_value = {"next_sort_order": 3}
+
+        cluster_id = create_reassignment_cluster(
+            batch_id="batch-1",
+            asset_ids=["asset-1", "asset-2"],
+        )
+
+        self.assertEqual(cluster_id, "cluster-new")
+        cluster_insert = next(
+            call
+            for call in cursor.execute.call_args_list
+            if "INSERT INTO travel_import_clusters" in call.args[0]
+        )
+        self.assertEqual(
+            cluster_insert.args[1],
+            ("cluster-new", "batch-1", 3, 37.55, 127.1),
+        )
+        assignment = next(
+            call
+            for call in cursor.execute.call_args_list
+            if "UPDATE travel_import_assets SET cluster_id = %s" in call.args[0]
+        )
+        self.assertEqual(
+            assignment.args[1],
+            ("cluster-new", "batch-1", "asset-1", "asset-2"),
+        )
+
+    @patch("src.services.import_cluster_assignments.lock_mutable_batch")
+    @patch("src.services.import_cluster_assignments.get_db_connection")
+    def test_reassignment_cluster_requires_coordinates(
+        self, get_db_connection: MagicMock, _lock_mutable_batch: MagicMock
+    ) -> None:
+        cursor = _mock_connection(get_db_connection)
+        cursor.fetchall.return_value = [
+            {
+                "id": "asset-1",
+                "cluster_id": "cluster-old",
+                "role": "gallery",
+                "latitude": None,
+                "longitude": None,
+            }
+        ]
+
+        with self.assertRaises(ImportAssignmentError) as raised:
+            create_reassignment_cluster(
+                batch_id="batch-1",
+                asset_ids=["asset-1"],
+            )
+
+        self.assertEqual(raised.exception.status_code, 422)
 
     @patch(
         "src.services.import_cluster_assignments.generate_id",

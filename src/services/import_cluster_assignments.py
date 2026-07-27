@@ -85,6 +85,75 @@ def unassign_assets(*, batch_id: str, asset_ids: list[str]) -> None:
             )
 
 
+def create_reassignment_cluster(*, batch_id: str, asset_ids: list[str]) -> str:
+    cluster_id = generate_id("cluster")
+    with get_db_connection() as connection:
+        with connection.cursor() as cursor:
+            _lock_batch(cursor, batch_id)
+            assets = _lock_assets(cursor, batch_id, asset_ids)
+            selected_covers = [
+                asset["id"] for asset in assets if asset["role"] == "cover"
+            ]
+            if len(selected_covers) > 1:
+                raise ImportAssignmentError(
+                    422, "assetIds may contain at most one cover-role asset"
+                )
+            coordinates = [
+                (asset.get("latitude"), asset.get("longitude")) for asset in assets
+            ]
+            if any(
+                latitude is None or longitude is None
+                for latitude, longitude in coordinates
+            ):
+                raise ImportAssignmentError(
+                    422, "All selected assets must have coordinates"
+                )
+            latitude = sum(float(point[0]) for point in coordinates) / len(coordinates)
+            longitude = sum(float(point[1]) for point in coordinates) / len(coordinates)
+            cursor.execute(
+                "SELECT COALESCE(MAX(sort_order), 0) + 1 AS next_sort_order "
+                "FROM travel_import_clusters WHERE batch_id = %s",
+                (batch_id,),
+            )
+            sort_order = cursor.fetchone()["next_sort_order"]
+            _clear_moved_asset_representatives(
+                cursor,
+                batch_id=batch_id,
+                destination_cluster_id=None,
+                asset_ids=asset_ids,
+            )
+            cursor.execute(
+                """
+                INSERT INTO travel_import_clusters (
+                    id, batch_id, sort_order, representative_asset_id,
+                    latitude, longitude, draft_category, draft_visibility,
+                    publish_action
+                ) VALUES (%s, %s, %s, NULL, %s, %s, 'other', 'public', 'create')
+                """,
+                (cluster_id, batch_id, sort_order, latitude, longitude),
+            )
+            placeholders = ",".join(["%s"] * len(asset_ids))
+            cursor.execute(
+                f"UPDATE travel_import_assets SET cluster_id = %s "
+                f"WHERE batch_id = %s AND id IN ({placeholders})",
+                (cluster_id, batch_id, *asset_ids),
+            )
+            detach_review_assets(
+                cursor,
+                asset_ids=asset_ids,
+                retained_cluster_id=cluster_id,
+            )
+            synchronize_cluster_representative(
+                cursor,
+                batch_id=batch_id,
+                cluster_id=cluster_id,
+                representative_asset_id=(
+                    selected_covers[0] if selected_covers else None
+                ),
+            )
+    return cluster_id
+
+
 def create_cluster_with_assets(
     *,
     batch_id: str,
@@ -289,7 +358,7 @@ def _lock_batch(cursor, batch_id: str) -> dict:
 def _lock_assets(cursor, batch_id: str, asset_ids: list[str]) -> list[dict]:
     placeholders = ",".join(["%s"] * len(asset_ids))
     cursor.execute(
-        f"SELECT id, cluster_id, role FROM travel_import_assets "
+        f"SELECT id, cluster_id, role, latitude, longitude "
         f"WHERE batch_id = %s AND id IN ({placeholders}) FOR UPDATE",
         (batch_id, *asset_ids),
     )

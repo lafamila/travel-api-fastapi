@@ -46,6 +46,7 @@ from ..services.import_cluster_assignments import (
     ImportAssignmentError,
     assign_assets_to_cluster,
     create_cluster_with_assets,
+    create_reassignment_cluster,
     synchronize_cluster_representative,
     unassign_assets,
 )
@@ -602,6 +603,24 @@ async def unassign_import_assets(
 ):
     try:
         unassign_assets(batch_id=batch_id, asset_ids=body.assetIds)
+    except ImportAssignmentError as error:
+        raise HTTPException(
+            status_code=error.status_code, detail=error.detail
+        ) from error
+    _refresh_manifest(batch_id)
+    return get_batch_detail(batch_id)
+
+
+@router.post(
+    "/{batch_id}/assets/reassign/new-cluster",
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_import_reassignment_cluster(
+    batch_id: str,
+    body: ImportAssetIdsRequest,
+):
+    try:
+        create_reassignment_cluster(batch_id=batch_id, asset_ids=body.assetIds)
     except ImportAssignmentError as error:
         raise HTTPException(
             status_code=error.status_code, detail=error.detail
