@@ -1,12 +1,105 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import logging
+from contextlib import contextmanager
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Iterator
 
 from ..config import TRAVEL_IMPORT_PUBLISH_ENABLED
 from ..connectors import get_db_connection
 from ..utils import generate_id
+
+logger = logging.getLogger(__name__)
+
+
+class UploadAssetBusyError(RuntimeError):
+    """Raised when another request is currently uploading the same client file."""
+
+
+class UploadedAssetClaim:
+    def __init__(self, connection, cursor, existing: dict | None) -> None:
+        self._connection = connection
+        self._cursor = cursor
+        self.existing = existing
+        self._saved = False
+
+    def save(
+        self,
+        *,
+        batch_id: str,
+        source_ref: str,
+        original_name: str,
+        media_type: str | None,
+        byte_size: int,
+        staging_key: str,
+    ) -> dict:
+        if self.existing is not None:
+            return self.existing
+        asset_id = add_uploaded_asset(
+            batch_id=batch_id,
+            source_ref=source_ref,
+            original_name=original_name,
+            media_type=media_type,
+            byte_size=byte_size,
+            staging_key=staging_key,
+            cursor=self._cursor,
+        )
+        self._connection.commit()
+        self._saved = True
+        self.existing = {
+            "id": asset_id,
+            "batch_id": batch_id,
+            "source_ref": source_ref,
+            "original_name": original_name,
+            "media_type": media_type,
+            "byte_size": byte_size,
+            "staging_key": staging_key,
+        }
+        return self.existing
+
+
+@contextmanager
+def lock_uploaded_asset(
+    batch_id: str,
+    source_ref: str,
+) -> Iterator[UploadedAssetClaim]:
+    lock_digest = hashlib.sha256(f"{batch_id}\0{source_ref}".encode()).hexdigest()
+    lock_name = f"travel-import-upload:{lock_digest[:40]}"
+    with get_db_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT GET_LOCK(%s, 0) AS acquired", (lock_name,))
+            acquired = cursor.fetchone()
+            if not acquired or acquired["acquired"] != 1:
+                raise UploadAssetBusyError(source_ref)
+            try:
+                cursor.execute(
+                    """
+                    SELECT id, batch_id, source_ref, original_name, media_type,
+                           byte_size, staging_key
+                    FROM travel_import_assets
+                    WHERE batch_id = %s AND source_ref = %s
+                    """,
+                    (batch_id, source_ref),
+                )
+                claim = UploadedAssetClaim(connection, cursor, cursor.fetchone())
+                try:
+                    yield claim
+                    if not claim._saved:
+                        connection.rollback()
+                except BaseException:
+                    connection.rollback()
+                    raise
+            finally:
+                try:
+                    cursor.execute("SELECT RELEASE_LOCK(%s)", (lock_name,))
+                except Exception:
+                    logger.warning(
+                        "Failed to release upload advisory lock %s",
+                        lock_name,
+                        exc_info=True,
+                    )
 
 
 def create_batch(
@@ -188,45 +281,80 @@ def add_uploaded_asset(
     media_type: str | None,
     byte_size: int,
     staging_key: str,
+    cursor=None,
 ) -> str:
     asset_id = generate_id("asset")
+    if cursor is not None:
+        return _add_uploaded_asset(
+            cursor,
+            asset_id=asset_id,
+            batch_id=batch_id,
+            source_ref=source_ref,
+            original_name=original_name,
+            media_type=media_type,
+            byte_size=byte_size,
+            staging_key=staging_key,
+        )
     with get_db_connection() as connection:
-        with connection.cursor() as cursor:
-            lock_mutable_batch(
-                cursor,
-                batch_id,
-                allowed_statuses=frozenset({"draft", "failed"}),
+        with connection.cursor() as own_cursor:
+            return _add_uploaded_asset(
+                own_cursor,
+                asset_id=asset_id,
+                batch_id=batch_id,
+                source_ref=source_ref,
+                original_name=original_name,
+                media_type=media_type,
+                byte_size=byte_size,
+                staging_key=staging_key,
             )
-            cursor.execute(
-                """
-                INSERT INTO travel_import_assets (
-                    id, batch_id, source_ref, original_name, media_type,
-                    byte_size, storage_kind, staging_key, classification,
-                    role, excluded
-                ) VALUES (%s, %s, %s, %s, %s, %s, 's3', %s, 'pending',
-                          'gallery', 0)
-                ON DUPLICATE KEY UPDATE
-                    media_type = VALUES(media_type),
-                    byte_size = VALUES(byte_size),
-                    staging_key = VALUES(staging_key)
-                """,
-                (
-                    asset_id,
-                    batch_id,
-                    source_ref,
-                    original_name,
-                    media_type,
-                    byte_size,
-                    staging_key,
-                ),
-            )
-            if cursor.rowcount != 1:
-                cursor.execute(
-                    "SELECT id FROM travel_import_assets "
-                    "WHERE batch_id = %s AND source_ref = %s",
-                    (batch_id, source_ref),
-                )
-                asset_id = cursor.fetchone()["id"]
+
+
+def _add_uploaded_asset(
+    cursor,
+    *,
+    asset_id: str,
+    batch_id: str,
+    source_ref: str,
+    original_name: str,
+    media_type: str | None,
+    byte_size: int,
+    staging_key: str,
+) -> str:
+    lock_mutable_batch(
+        cursor,
+        batch_id,
+        allowed_statuses=frozenset({"draft", "failed"}),
+    )
+    cursor.execute(
+        """
+        INSERT INTO travel_import_assets (
+            id, batch_id, source_ref, original_name, media_type,
+            byte_size, storage_kind, staging_key, classification,
+            role, excluded
+        ) VALUES (%s, %s, %s, %s, %s, %s, 's3', %s, 'pending',
+                  'gallery', 0)
+        ON DUPLICATE KEY UPDATE
+            media_type = VALUES(media_type),
+            byte_size = VALUES(byte_size),
+            staging_key = VALUES(staging_key)
+        """,
+        (
+            asset_id,
+            batch_id,
+            source_ref,
+            original_name,
+            media_type,
+            byte_size,
+            staging_key,
+        ),
+    )
+    if cursor.rowcount != 1:
+        cursor.execute(
+            "SELECT id FROM travel_import_assets "
+            "WHERE batch_id = %s AND source_ref = %s",
+            (batch_id, source_ref),
+        )
+        asset_id = cursor.fetchone()["id"]
     return asset_id
 
 

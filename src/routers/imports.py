@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import mimetypes
+import re
 from pathlib import Path
 
 from fastapi import (
     APIRouter,
     Depends,
     File,
+    Form,
     HTTPException,
     Request,
     UploadFile,
@@ -53,6 +56,7 @@ from ..services.import_cluster_assignments import (
 )
 from ..services.authorization import can_manage_place
 from ..services.import_repository import (
+    UploadAssetBusyError,
     add_uploaded_asset,
     create_batch,
     delete_batch,
@@ -60,6 +64,7 @@ from ..services.import_repository import (
     get_batch_detail,
     get_batch_row,
     list_batches,
+    lock_uploaded_asset,
     lock_mutable_batch,
 )
 from ..services.import_review_drafts import (
@@ -96,6 +101,7 @@ _BROWSER_SAFE_PREVIEW_TYPES = {
     ".png": "image/png",
     ".webp": "image/webp",
 }
+_CLIENT_FILE_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._~-]{0,127}\Z")
 
 
 @router.get("")
@@ -137,6 +143,7 @@ async def create_import_batch(
 async def upload_import_files(
     batch_id: str,
     files: list[UploadFile] = File(...),
+    clientFileIds: list[str] | None = Form(None),
 ):
     batch = _require_batch(batch_id)
     if batch["source_type"] != "upload":
@@ -149,6 +156,7 @@ async def upload_import_files(
         )
     if not files:
         raise HTTPException(status_code=400, detail="At least one file is required")
+    validated_client_file_ids = _validate_client_file_ids(clientFileIds, len(files))
 
     declared_total = sum(file.size or 0 for file in files)
     if declared_total > TRAVEL_IMPORT_MAX_UPLOAD_BYTES:
@@ -157,7 +165,7 @@ async def upload_import_files(
         )
     scanned_files = []
     actual_total = 0
-    for file in files:
+    for index, file in enumerate(files):
         filename = Path(file.filename or "upload").name
         if filename in {"", ".", ".."}:
             raise HTTPException(status_code=400, detail="Invalid upload filename")
@@ -170,10 +178,23 @@ async def upload_import_files(
                     status_code=413, detail="Upload request exceeds configured limit"
                 )
         await file.seek(0)
-        scanned_files.append((file, filename, size))
+        scanned_files.append(
+            (file, filename, size, validated_client_file_ids[index])
+        )
 
     uploaded = []
-    for file, filename, size in scanned_files:
+    for file, filename, size, client_file_id in scanned_files:
+        if client_file_id is not None:
+            uploaded.append(
+                _upload_idempotent_file(
+                    batch_id=batch_id,
+                    file=file,
+                    filename=filename,
+                    size=size,
+                    client_file_id=client_file_id,
+                )
+            )
+            continue
         upload_token = generate_id("upload")
         key = f"imports/{batch_id}/staging/{upload_token}/{safe_segment(filename, 'upload')}"
         upload_fileobj_to_key(
@@ -202,6 +223,93 @@ async def upload_import_files(
             ) from exc
         uploaded.append({"id": asset_id, "originalName": filename, "byteSize": size})
     return {"batchId": batch_id, "files": uploaded}
+
+
+def _validate_client_file_ids(
+    client_file_ids: list[str] | None,
+    file_count: int,
+) -> list[str | None]:
+    if client_file_ids is None:
+        return [None] * file_count
+    if len(client_file_ids) != file_count:
+        raise HTTPException(
+            status_code=400,
+            detail="clientFileIds must contain exactly one ID for each file",
+        )
+    if any(not _CLIENT_FILE_ID_PATTERN.fullmatch(value) for value in client_file_ids):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Each clientFileId must be 1-128 URL-safe characters "
+                "(letters, numbers, dot, underscore, tilde, or hyphen)"
+            ),
+        )
+    if len(set(client_file_ids)) != len(client_file_ids):
+        raise HTTPException(
+            status_code=400,
+            detail="clientFileIds must be unique within a request",
+        )
+    return list(client_file_ids)
+
+
+def _upload_idempotent_file(
+    *,
+    batch_id: str,
+    file: UploadFile,
+    filename: str,
+    size: int,
+    client_file_id: str,
+) -> dict:
+    digest = hashlib.sha256(client_file_id.encode()).hexdigest()
+    source_ref = f"upload:client:{digest}"
+    key = f"imports/{batch_id}/staging/client/{digest}"
+    try:
+        with lock_uploaded_asset(batch_id, source_ref) as claim:
+            if claim.existing is not None:
+                return _uploaded_asset_response(claim.existing)
+            upload_attempted = False
+            try:
+                upload_attempted = True
+                upload_fileobj_to_key(
+                    file.file,
+                    key,
+                    file.content_type
+                    or mimetypes.guess_type(filename)[0]
+                    or "application/octet-stream",
+                )
+                asset = claim.save(
+                    batch_id=batch_id,
+                    source_ref=source_ref,
+                    original_name=filename,
+                    media_type=file.content_type,
+                    byte_size=size,
+                    staging_key=key,
+                )
+            except BaseException:
+                if upload_attempted:
+                    try:
+                        delete_object(key)
+                    except Exception:
+                        pass
+                raise
+    except UploadAssetBusyError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="A file with this clientFileId is already being uploaded",
+        ) from exc
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(
+            status_code=409, detail="This batch no longer accepts files"
+        ) from exc
+    return _uploaded_asset_response(asset)
+
+
+def _uploaded_asset_response(asset: dict) -> dict:
+    return {
+        "id": asset["id"],
+        "originalName": asset["original_name"],
+        "byteSize": asset.get("byte_size"),
+    }
 
 
 @router.post("/{batch_id}/process", status_code=status.HTTP_202_ACCEPTED)
