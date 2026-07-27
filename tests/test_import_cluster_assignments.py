@@ -283,6 +283,12 @@ class ImportAssignmentTransactionTests(unittest.TestCase):
             asset_ids=["asset-1"],
         )
 
+        asset_lock = next(
+            call
+            for call in cursor.execute.call_args_list
+            if "SELECT id, cluster_id, role" in call.args[0]
+        )
+        self.assertIn("FROM travel_import_assets", asset_lock.args[0])
         update = next(
             call
             for call in cursor.execute.call_args_list

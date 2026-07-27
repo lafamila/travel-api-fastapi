@@ -359,6 +359,7 @@ def _lock_assets(cursor, batch_id: str, asset_ids: list[str]) -> list[dict]:
     placeholders = ",".join(["%s"] * len(asset_ids))
     cursor.execute(
         f"SELECT id, cluster_id, role, latitude, longitude "
+        f"FROM travel_import_assets "
         f"WHERE batch_id = %s AND id IN ({placeholders}) FOR UPDATE",
         (batch_id, *asset_ids),
     )
