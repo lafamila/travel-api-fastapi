@@ -73,6 +73,7 @@ class ImportAssetPatchRequest(BaseModel):
     role: ImportAssetRole | None = None
     exclusionReason: ImportExclusionReason | None = None
     clusterId: str | None = Field(default=None, max_length=50)
+    deleteEmptyClusters: bool = False
 
 
 class ImportClusterDraftPatchRequest(BaseModel):
@@ -94,6 +95,7 @@ class ImportClusterDraftPatchRequest(BaseModel):
 
 class ImportAssetIdsRequest(BaseModel):
     assetIds: list[str] = Field(min_length=1)
+    deleteEmptyClusters: bool = False
 
     @model_validator(mode="after")
     def validate_asset_ids(self):

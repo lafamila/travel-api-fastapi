@@ -16,7 +16,11 @@ class ImportAssignmentError(Exception):
 
 
 def assign_assets_to_cluster(
-    *, batch_id: str, cluster_id: str, asset_ids: list[str]
+    *,
+    batch_id: str,
+    cluster_id: str,
+    asset_ids: list[str],
+    delete_empty_clusters: bool = False,
 ) -> None:
     with get_db_connection() as connection:
         with connection.cursor() as cursor:
@@ -29,6 +33,11 @@ def assign_assets_to_cluster(
             if not cursor.fetchone():
                 raise ImportAssignmentError(404, "Import cluster not found")
             assets = _lock_assets(cursor, batch_id, asset_ids)
+            source_cluster_ids = {
+                asset["cluster_id"]
+                for asset in assets
+                if asset["cluster_id"] and asset["cluster_id"] != cluster_id
+            }
             selected_covers = [
                 asset["id"] for asset in assets if asset["role"] == "cover"
             ]
@@ -60,13 +69,27 @@ def assign_assets_to_cluster(
                     cluster_id=cluster_id,
                     representative_asset_id=selected_covers[0],
                 )
+            delete_empty_source_clusters(
+                cursor,
+                batch_id=batch_id,
+                cluster_ids=source_cluster_ids,
+                requested=delete_empty_clusters,
+            )
 
 
-def unassign_assets(*, batch_id: str, asset_ids: list[str]) -> None:
+def unassign_assets(
+    *,
+    batch_id: str,
+    asset_ids: list[str],
+    delete_empty_clusters: bool = False,
+) -> None:
     with get_db_connection() as connection:
         with connection.cursor() as cursor:
             _lock_batch(cursor, batch_id)
-            _lock_assets(cursor, batch_id, asset_ids)
+            assets = _lock_assets(cursor, batch_id, asset_ids)
+            source_cluster_ids = {
+                asset["cluster_id"] for asset in assets if asset["cluster_id"]
+            }
             placeholders = ",".join(["%s"] * len(asset_ids))
             _clear_moved_asset_representatives(
                 cursor,
@@ -83,14 +106,28 @@ def unassign_assets(*, batch_id: str, asset_ids: list[str]) -> None:
                 cursor,
                 asset_ids=asset_ids,
             )
+            delete_empty_source_clusters(
+                cursor,
+                batch_id=batch_id,
+                cluster_ids=source_cluster_ids,
+                requested=delete_empty_clusters,
+            )
 
 
-def create_reassignment_cluster(*, batch_id: str, asset_ids: list[str]) -> str:
+def create_reassignment_cluster(
+    *,
+    batch_id: str,
+    asset_ids: list[str],
+    delete_empty_clusters: bool = False,
+) -> str:
     cluster_id = generate_id("cluster")
     with get_db_connection() as connection:
         with connection.cursor() as cursor:
             _lock_batch(cursor, batch_id)
             assets = _lock_assets(cursor, batch_id, asset_ids)
+            source_cluster_ids = {
+                asset["cluster_id"] for asset in assets if asset["cluster_id"]
+            }
             selected_covers = [
                 asset["id"] for asset in assets if asset["role"] == "cover"
             ]
@@ -150,6 +187,12 @@ def create_reassignment_cluster(*, batch_id: str, asset_ids: list[str]) -> str:
                 representative_asset_id=(
                     selected_covers[0] if selected_covers else None
                 ),
+            )
+            delete_empty_source_clusters(
+                cursor,
+                batch_id=batch_id,
+                cluster_ids=source_cluster_ids,
+                requested=delete_empty_clusters,
             )
     return cluster_id
 
@@ -320,6 +363,38 @@ def synchronize_cluster_representative(
         "WHERE id = %s AND batch_id = %s",
         (representative_asset_id, cluster_id, batch_id),
     )
+
+
+def delete_empty_source_clusters(
+    cursor,
+    *,
+    batch_id: str,
+    cluster_ids: set[str],
+    requested: bool,
+) -> list[str]:
+    if not requested or not cluster_ids:
+        return []
+    deleted_ids = []
+    for cluster_id in sorted(cluster_ids):
+        cursor.execute(
+            "SELECT COUNT(*) AS active_count FROM travel_import_assets "
+            "WHERE batch_id = %s AND cluster_id = %s AND role <> 'excluded'",
+            (batch_id, cluster_id),
+        )
+        if cursor.fetchone()["active_count"] != 0:
+            continue
+        cursor.execute(
+            "UPDATE travel_import_assets SET cluster_id = NULL "
+            "WHERE batch_id = %s AND cluster_id = %s",
+            (batch_id, cluster_id),
+        )
+        cursor.execute(
+            "DELETE FROM travel_import_clusters WHERE batch_id = %s AND id = %s",
+            (batch_id, cluster_id),
+        )
+        if cursor.rowcount:
+            deleted_ids.append(cluster_id)
+    return deleted_ids
 
 
 def _clear_moved_asset_representatives(

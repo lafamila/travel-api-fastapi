@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from src.import_schemas import (
+    ImportAssetIdsRequest,
     ImportAssetPatchRequest,
     ImportClusterCreateRequest,
     ImportClusterDraftPatchRequest,
@@ -28,6 +29,7 @@ from src.services.import_cluster_assignments import (
     assign_assets_to_cluster,
     create_cluster_with_assets,
     create_reassignment_cluster,
+    delete_empty_source_clusters,
     unassign_assets,
 )
 from src.services.import_processor import ImportProcessor
@@ -74,6 +76,19 @@ class ImportClusterRequestValidationTests(unittest.TestCase):
                 latitude=37.5,
                 longitude=127.0,
             )
+
+    def test_asset_mutations_preserve_empty_clusters_by_default(self) -> None:
+        patch = ImportAssetPatchRequest(role="excluded")
+        reassignment = ImportAssetIdsRequest(assetIds=["asset-1"])
+
+        self.assertFalse(patch.deleteEmptyClusters)
+        self.assertFalse(reassignment.deleteEmptyClusters)
+        self.assertTrue(
+            ImportAssetIdsRequest(
+                assetIds=["asset-1"],
+                deleteEmptyClusters=True,
+            ).deleteEmptyClusters
+        )
 
     def test_cluster_draft_accepts_place_detail_fields(self) -> None:
         draft = ImportClusterDraftPatchRequest(
@@ -177,6 +192,43 @@ class ImportClusterLocationTests(unittest.IsolatedAsyncioTestCase):
 
 
 class ImportAssignmentTransactionTests(unittest.TestCase):
+    def test_requested_empty_cluster_cleanup_deletes_only_empty_sources(self) -> None:
+        cursor = MagicMock()
+        cursor.fetchone.side_effect = [
+            {"active_count": 0},
+            {"active_count": 2},
+        ]
+        cursor.rowcount = 1
+
+        deleted_ids = delete_empty_source_clusters(
+            cursor,
+            batch_id="batch-1",
+            cluster_ids={"cluster-1-empty", "cluster-2-active"},
+            requested=True,
+        )
+
+        self.assertEqual(deleted_ids, ["cluster-1-empty"])
+        delete_calls = [
+            call
+            for call in cursor.execute.call_args_list
+            if "DELETE FROM travel_import_clusters" in call.args[0]
+        ]
+        self.assertEqual(len(delete_calls), 1)
+        self.assertEqual(delete_calls[0].args[1], ("batch-1", "cluster-1-empty"))
+
+    def test_empty_cluster_cleanup_is_noop_without_user_request(self) -> None:
+        cursor = MagicMock()
+
+        deleted_ids = delete_empty_source_clusters(
+            cursor,
+            batch_id="batch-1",
+            cluster_ids={"cluster-empty"},
+            requested=False,
+        )
+
+        self.assertEqual(deleted_ids, [])
+        cursor.execute.assert_not_called()
+
     @patch("src.services.import_cluster_assignments.lock_mutable_batch")
     @patch("src.services.import_cluster_assignments.get_db_connection")
     def test_new_cluster_representative_must_be_gallery_or_cover(
@@ -519,6 +571,49 @@ class ImportAssignmentTransactionTests(unittest.TestCase):
 
 
 class ImportCoverAndClusteringTests(unittest.IsolatedAsyncioTestCase):
+    @patch("src.routers.imports._require_batch")
+    @patch("src.routers.imports.get_batch_detail", return_value={"id": "batch-1"})
+    @patch("src.routers.imports._refresh_manifest")
+    @patch("src.routers.imports._lock_draft_mutation")
+    @patch("src.routers.imports.get_db_connection")
+    async def test_exclusion_requests_empty_cluster_cleanup_only_when_confirmed(
+        self,
+        get_db_connection: MagicMock,
+        _lock_draft_mutation: MagicMock,
+        _refresh_manifest: MagicMock,
+        _get_batch_detail: MagicMock,
+        _require_batch: MagicMock,
+    ) -> None:
+        cursor = _mock_connection(get_db_connection)
+        cursor.fetchone.return_value = {
+            "id": "asset-last",
+            "batch_id": "batch-1",
+            "cluster_id": "cluster-1",
+            "classification": "photo",
+            "role": "gallery",
+            "captured_at": None,
+        }
+
+        with patch(
+            "src.routers.imports.delete_empty_source_clusters"
+        ) as cleanup:
+            await patch_import_asset(
+                "batch-1",
+                "asset-last",
+                ImportAssetPatchRequest(
+                    role="excluded",
+                    exclusionReason="other",
+                    deleteEmptyClusters=True,
+                ),
+            )
+
+        cleanup.assert_called_once_with(
+            cursor,
+            batch_id="batch-1",
+            cluster_ids={"cluster-1"},
+            requested=True,
+        )
+
     @patch("src.routers.imports._require_batch")
     @patch("src.routers.imports.get_batch_detail", return_value={"id": "batch-1"})
     @patch("src.routers.imports._refresh_manifest")

@@ -47,6 +47,7 @@ from ..services.import_cluster_assignments import (
     assign_assets_to_cluster,
     create_cluster_with_assets,
     create_reassignment_cluster,
+    delete_empty_source_clusters,
     synchronize_cluster_representative,
     unassign_assets,
 )
@@ -449,6 +450,18 @@ async def patch_import_asset(
                         effective_cluster_id if effective_role == "review" else None
                     ),
                 )
+            source_cluster_id = asset.get("cluster_id")
+            removes_source_photo = source_cluster_id and (
+                effective_cluster_id != source_cluster_id
+                or effective_role == "excluded"
+            )
+            if removes_source_photo:
+                delete_empty_source_clusters(
+                    cursor,
+                    batch_id=batch_id,
+                    cluster_ids={source_cluster_id},
+                    requested=body.deleteEmptyClusters,
+                )
     _refresh_manifest(batch_id)
     return get_batch_detail(batch_id)
 
@@ -587,6 +600,7 @@ async def assign_import_cluster_assets(
             batch_id=batch_id,
             cluster_id=cluster_id,
             asset_ids=body.assetIds,
+            delete_empty_clusters=body.deleteEmptyClusters,
         )
     except ImportAssignmentError as error:
         raise HTTPException(
@@ -602,7 +616,11 @@ async def unassign_import_assets(
     body: ImportAssetIdsRequest,
 ):
     try:
-        unassign_assets(batch_id=batch_id, asset_ids=body.assetIds)
+        unassign_assets(
+            batch_id=batch_id,
+            asset_ids=body.assetIds,
+            delete_empty_clusters=body.deleteEmptyClusters,
+        )
     except ImportAssignmentError as error:
         raise HTTPException(
             status_code=error.status_code, detail=error.detail
@@ -620,7 +638,11 @@ async def create_import_reassignment_cluster(
     body: ImportAssetIdsRequest,
 ):
     try:
-        create_reassignment_cluster(batch_id=batch_id, asset_ids=body.assetIds)
+        create_reassignment_cluster(
+            batch_id=batch_id,
+            asset_ids=body.assetIds,
+            delete_empty_clusters=body.deleteEmptyClusters,
+        )
     except ImportAssignmentError as error:
         raise HTTPException(
             status_code=error.status_code, detail=error.detail
