@@ -173,6 +173,23 @@ class TravelPlaceResponseTests(unittest.TestCase):
         self.assertIn("p.deleted_at IS NULL", list_query)
 
     @patch("src.routers.places.get_db_connection")
+    def test_active_list_filters_all_searchable_place_text(
+        self, get_db_connection: MagicMock
+    ) -> None:
+        cursor = _mock_connection(get_db_connection)
+        cursor.fetchall.side_effect = [[], []]
+
+        result = asyncio.run(places.get_places(q="  야경  ", user=OWNER))
+
+        self.assertEqual(result, [])
+        query, values = cursor.execute.call_args_list[0].args
+        self.assertIn("LOWER(COALESCE(p.name, '')) LIKE %s", query)
+        self.assertIn("LOWER(COALESCE(p.address, '')) LIKE %s", query)
+        self.assertIn("LOWER(COALESCE(p.description, '')) LIKE %s", query)
+        self.assertIn("LOWER(COALESCE(p.special_notes, '')) LIKE %s", query)
+        self.assertEqual(values[-4:], ["%야경%"] * 4)
+
+    @patch("src.routers.places.get_db_connection")
     def test_detail_counts_loaded_reviews_and_requires_active_place(
         self, get_db_connection: MagicMock
     ) -> None:

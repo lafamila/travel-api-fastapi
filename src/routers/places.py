@@ -184,6 +184,7 @@ async def get_places(
     sw_lng: float | None = None,
     ne_lat: float | None = None,
     ne_lng: float | None = None,
+    q: str | None = None,
     user: dict = Depends(get_current_user),
 ):
     conditions = ["p.deleted_at IS NULL"]
@@ -210,6 +211,20 @@ async def get_places(
             ]
         )
         values.extend([sw_lat, ne_lat, sw_lng, ne_lng])
+    search_term = (q or "").strip().lower()
+    if search_term:
+        conditions.append(
+            """
+            (
+                LOWER(COALESCE(p.name, '')) LIKE %s OR
+                LOWER(COALESCE(p.address, '')) LIKE %s OR
+                LOWER(COALESCE(p.description, '')) LIKE %s OR
+                LOWER(COALESCE(p.special_notes, '')) LIKE %s
+            )
+            """
+        )
+        pattern = f"%{search_term}%"
+        values.extend([pattern] * 4)
     where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     with get_db_connection() as connection:
         with connection.cursor() as cursor:
