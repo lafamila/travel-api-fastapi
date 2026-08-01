@@ -92,7 +92,8 @@ def _require_accessible_place_id(cursor, place_id: str, user: dict) -> str:
         """
         SELECT id, owner_account_id, visibility
         FROM travel_places
-        WHERE id = %s
+        WHERE id = %s AND deleted_at IS NULL
+        FOR UPDATE
         """,
         (place_id,),
     )

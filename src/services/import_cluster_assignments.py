@@ -447,7 +447,10 @@ def _lock_assets(cursor, batch_id: str, asset_ids: list[str]) -> list[dict]:
 
 
 def _require_manageable_place(cursor, place_id: str, user: dict) -> None:
-    cursor.execute("SELECT * FROM travel_places WHERE id = %s", (place_id,))
+    cursor.execute(
+        "SELECT * FROM travel_places WHERE id = %s AND deleted_at IS NULL FOR UPDATE",
+        (place_id,),
+    )
     place = cursor.fetchone()
     if not place or not can_manage_place(user, place):
         raise ImportAssignmentError(404, "Merge target not found")

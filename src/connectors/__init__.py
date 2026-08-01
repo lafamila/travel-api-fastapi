@@ -155,11 +155,14 @@ def _create_tables(cursor) -> None:
             owner_name VARCHAR(255) NOT NULL,
             owner_email VARCHAR(320) NULL,
             visibility VARCHAR(20) NOT NULL DEFAULT 'public',
+            expectation ENUM('ordinary', 'confident') NOT NULL DEFAULT 'ordinary',
+            deleted_at DATETIME NULL,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             INDEX idx_place_coordinates (latitude, longitude),
             INDEX idx_place_category (category),
-            INDEX idx_place_owner_visibility (owner_account_id, visibility)
+            INDEX idx_place_owner_visibility (owner_account_id, visibility),
+            INDEX idx_place_owner_deleted (owner_account_id, deleted_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         """
     )
@@ -300,6 +303,10 @@ def _extend_existing_tables(cursor) -> None:
             "owner_name": "VARCHAR(255) NULL",
             "owner_email": "VARCHAR(320) NULL",
             "visibility": "VARCHAR(20) NULL DEFAULT 'public'",
+            "expectation": (
+                "ENUM('ordinary', 'confident') NOT NULL DEFAULT 'ordinary'"
+            ),
+            "deleted_at": "DATETIME NULL",
             "cover_media_id": "VARCHAR(50) NULL",
             "photo_media_ids_json": "LONGTEXT NULL",
         },
@@ -325,6 +332,12 @@ def _extend_existing_tables(cursor) -> None:
         "travel_places",
         "idx_place_owner_visibility",
         "owner_account_id, visibility",
+    )
+    _ensure_index(
+        cursor,
+        "travel_places",
+        "idx_place_owner_deleted",
+        "owner_account_id, deleted_at",
     )
     _ensure_index(
         cursor, "travel_place_reviews", "idx_review_author", "author_account_id"

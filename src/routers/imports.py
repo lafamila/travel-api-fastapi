@@ -1259,7 +1259,10 @@ def _move_cluster_review_drafts(
 
 
 def _require_manageable_place(cursor, place_id: str, user: dict) -> dict:
-    cursor.execute("SELECT * FROM travel_places WHERE id = %s", (place_id,))
+    cursor.execute(
+        "SELECT * FROM travel_places WHERE id = %s AND deleted_at IS NULL FOR UPDATE",
+        (place_id,),
+    )
     place = cursor.fetchone()
     if not place or not can_manage_place(user, place):
         raise HTTPException(status_code=404, detail="Merge target not found")

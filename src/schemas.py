@@ -17,6 +17,7 @@ TravelPlaceCategory = Literal[
     "other",
 ]
 TravelPlaceVisibility = Literal["public", "private"]
+TravelPlaceExpectation = Literal["ordinary", "confident"]
 
 
 class TravelReview(BaseModel):
@@ -61,6 +62,7 @@ class TravelPlaceBase(BaseModel):
     photoMediaIds: list[str] = Field(default_factory=list)
     tags: list[str] = Field(default_factory=list)
     visibility: TravelPlaceVisibility = "public"
+    expectation: TravelPlaceExpectation = "ordinary"
 
 
 class TravelPlaceCreateRequest(TravelPlaceBase):
@@ -90,10 +92,13 @@ class TravelPlaceUpdateRequest(BaseModel):
     photoMediaIds: list[str] | None = None
     tags: list[str] | None = None
     visibility: TravelPlaceVisibility | None = None
+    expectation: TravelPlaceExpectation | None = None
 
 
 class TravelPlace(TravelPlaceBase):
     id: str
+    reviewCount: int = Field(ge=0)
+    deletedAt: str | None
     createdAt: str
     updatedAt: str
     reviews: list[TravelReview] = Field(default_factory=list)

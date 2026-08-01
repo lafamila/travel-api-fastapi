@@ -58,6 +58,9 @@ legacy data to the wrong owner.
 - Public places are visible only to accepted friends, not to arbitrary users.
 - Courses remain private to their owner; stops may reference own places or an
   accepted friend's public places.
+- Place deletion is soft: reviews, media, and course stop references remain
+  intact. Owners can list/restore their deleted places; superadmins can manage
+  all deleted places.
 
 ## Photo import playground API
 

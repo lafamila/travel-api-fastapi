@@ -45,7 +45,7 @@ PLACE_COLUMNS = """
     opening_hours, special_notes, cover_image_url, photo_urls_json,
     cover_media_id, photo_media_ids_json, tags_json,
     owner_account_id, owner_login_id, owner_name, owner_email, visibility,
-    created_at, updated_at
+    expectation, deleted_at, created_at, updated_at
 """
 REVIEW_COLUMNS = """
     id, place_id, rating, headline, body, visited_at, photo_urls_json,
@@ -92,6 +92,7 @@ def _map_place(
     cursor,
     reviews: list[TravelReview] | None = None,
     review_media_ids: set[str] | None = None,
+    review_count: int = 0,
 ) -> TravelPlace:
     cover_media_id = row.get("cover_media_id")
     excluded_media_ids = review_media_ids or set()
@@ -122,21 +123,26 @@ def _map_place(
         photoMediaIds=photo_media_ids,
         tags=parse_json_list(row.get("tags_json")),
         visibility=row["visibility"],
+        expectation=row.get("expectation") or "ordinary",
         ownerAccountId=row["owner_account_id"],
         ownerLoginId=row["owner_login_id"],
         ownerName=row["owner_name"],
         ownerEmail=row.get("owner_email"),
         externalCoverImageUrl=row["cover_image_url"],
         externalPhotoUrls=external_photo_urls,
+        reviewCount=review_count,
+        deletedAt=(row["deleted_at"].isoformat() if row.get("deleted_at") else None),
         createdAt=row["created_at"].isoformat(),
         updatedAt=row["updated_at"].isoformat(),
         reviews=reviews or [],
     )
 
 
-def _review_media_ids_by_place(cursor, place_ids: list[str]) -> dict[str, set[str]]:
+def _review_metadata_by_place(
+    cursor, place_ids: list[str]
+) -> tuple[dict[str, set[str]], dict[str, int]]:
     if not place_ids:
-        return {}
+        return {}, {}
     placeholders = ",".join(["%s"] * len(place_ids))
     cursor.execute(
         f"""
@@ -146,17 +152,22 @@ def _review_media_ids_by_place(cursor, place_ids: list[str]) -> dict[str, set[st
         """,
         tuple(place_ids),
     )
-    result: dict[str, set[str]] = {}
+    media_ids_by_place: dict[str, set[str]] = {}
+    review_counts: dict[str, int] = {}
     for review in cursor.fetchall():
-        result.setdefault(review["place_id"], set()).update(
+        place_id = review["place_id"]
+        media_ids_by_place.setdefault(place_id, set()).update(
             parse_json_list(review.get("photo_media_ids_json"))
         )
-    return result
+        review_counts[place_id] = review_counts.get(place_id, 0) + 1
+    return media_ids_by_place, review_counts
 
 
 def _fetch_place_row(cursor, place_id: str, user: dict) -> dict:
     cursor.execute(
-        f"SELECT {PLACE_COLUMNS} FROM travel_places WHERE id = %s", (place_id,)
+        f"SELECT {PLACE_COLUMNS} FROM travel_places "
+        "WHERE id = %s AND deleted_at IS NULL",
+        (place_id,),
     )
     row = cursor.fetchone()
     if not row:
@@ -175,7 +186,7 @@ async def get_places(
     ne_lng: float | None = None,
     user: dict = Depends(get_current_user),
 ):
-    conditions = []
+    conditions = ["p.deleted_at IS NULL"]
     values: list = []
     if user["permission"] != "superadmin":
         conditions.append(
@@ -212,7 +223,7 @@ async def get_places(
                 values,
             )
             rows = cursor.fetchall()
-            review_media_ids = _review_media_ids_by_place(
+            review_media_ids, review_counts = _review_metadata_by_place(
                 cursor, [row["id"] for row in rows]
             )
             return [
@@ -220,6 +231,7 @@ async def get_places(
                     row,
                     cursor,
                     review_media_ids=review_media_ids.get(row["id"], set()),
+                    review_count=review_counts.get(row["id"], 0),
                 )
                 for row in rows
             ]
@@ -244,10 +256,10 @@ async def create_place(
                     id, name, category, latitude, longitude, address, description,
                     opening_hours, special_notes, cover_image_url,
                     photo_urls_json, cover_media_id, photo_media_ids_json,
-                    tags_json, visibility,
+                    tags_json, visibility, expectation,
                     owner_account_id, owner_login_id, owner_name, owner_email
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                          %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                          %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     place_id,
@@ -265,6 +277,7 @@ async def create_place(
                     dump_json(photo_media_ids),
                     dump_json(data.tags),
                     data.visibility,
+                    data.expectation,
                     user["account_id"],
                     user["login_id"],
                     user["name"],
@@ -275,7 +288,7 @@ async def create_place(
                 f"SELECT {PLACE_COLUMNS} FROM travel_places WHERE id = %s",
                 (place_id,),
             )
-            return _map_place(cursor.fetchone(), cursor)
+            return _map_place(cursor.fetchone(), cursor, review_count=0)
 
 
 async def _resolve_place_link(data_url: str, request: Request) -> PlaceLinkResult:
@@ -344,6 +357,41 @@ async def resolve_google_link(
     )
 
 
+@router.get("/deleted", response_model=list[TravelPlace])
+async def get_deleted_places(
+    user: dict = Depends(get_current_user),
+):
+    conditions = ["p.deleted_at IS NOT NULL"]
+    values: list = []
+    if user["permission"] != "superadmin":
+        conditions.append("p.owner_account_id = %s")
+        values.append(user["account_id"])
+    with get_db_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT {PLACE_COLUMNS}
+                FROM travel_places p
+                WHERE {" AND ".join(conditions)}
+                ORDER BY p.deleted_at DESC
+                """,
+                values,
+            )
+            rows = cursor.fetchall()
+            review_media_ids, review_counts = _review_metadata_by_place(
+                cursor, [row["id"] for row in rows]
+            )
+            return [
+                _map_place(
+                    row,
+                    cursor,
+                    review_media_ids=review_media_ids.get(row["id"], set()),
+                    review_count=review_counts.get(row["id"], 0),
+                )
+                for row in rows
+            ]
+
+
 @router.get("/{place_id}", response_model=TravelPlace)
 async def get_place(
     place_id: str,
@@ -370,6 +418,7 @@ async def get_place(
                 cursor,
                 reviews,
                 review_media_ids=review_media_ids,
+                review_count=len(reviews),
             )
 
 
@@ -403,12 +452,14 @@ async def update_place(
         "photoMediaIds": "photo_media_ids_json",
         "tags": "tags_json",
         "visibility": "visibility",
+        "expectation": "expectation",
     }
     removed_media_ids: list[str] = []
     with get_db_connection() as connection:
         with connection.cursor() as cursor:
             cursor.execute(
-                f"SELECT {PLACE_COLUMNS} FROM travel_places WHERE id = %s",
+                f"SELECT {PLACE_COLUMNS} FROM travel_places "
+                "WHERE id = %s AND deleted_at IS NULL FOR UPDATE",
                 (place_id,),
             )
             row = cursor.fetchone()
@@ -443,7 +494,8 @@ async def update_place(
                 )
             values.append(place_id)
             cursor.execute(
-                f"UPDATE travel_places SET {', '.join(clauses)} WHERE id = %s",
+                f"UPDATE travel_places SET {', '.join(clauses)} "
+                "WHERE id = %s AND deleted_at IS NULL",
                 values,
             )
             next_cover = update_fields.get("coverMediaId", row.get("cover_media_id"))
@@ -464,11 +516,10 @@ async def delete_place(
     place_id: str,
     user: dict = Depends(get_current_user),
 ):
-    removed_media_ids: list[str] = []
     with get_db_connection() as connection:
         with connection.cursor() as cursor:
             cursor.execute(
-                f"SELECT {PLACE_COLUMNS} FROM travel_places WHERE id = %s",
+                f"SELECT {PLACE_COLUMNS} FROM travel_places WHERE id = %s FOR UPDATE",
                 (place_id,),
             )
             row = cursor.fetchone()
@@ -478,34 +529,41 @@ async def delete_place(
                 raise HTTPException(
                     status_code=403, detail="Place owner access required"
                 )
+            if row.get("deleted_at"):
+                return {"message": "Place deleted"}
             cursor.execute(
-                "SELECT id FROM travel_course_stops WHERE place_id = %s LIMIT 1",
+                "UPDATE travel_places SET deleted_at = CURRENT_TIMESTAMP "
+                "WHERE id = %s AND deleted_at IS NULL",
                 (place_id,),
             )
-            if cursor.fetchone():
-                raise HTTPException(
-                    status_code=409,
-                    detail="Place is referenced by an existing course and cannot be deleted",
-                )
-            removed_media_ids = [
-                item
-                for item in (
-                    [row.get("cover_media_id")]
-                    + parse_json_list(row.get("photo_media_ids_json"))
-                )
-                if item
-            ]
-            cursor.execute(
-                "SELECT photo_media_ids_json FROM travel_place_reviews WHERE place_id = %s",
-                (place_id,),
-            )
-            for review in cursor.fetchall():
-                removed_media_ids.extend(
-                    parse_json_list(review.get("photo_media_ids_json"))
-                )
-            cursor.execute("DELETE FROM travel_places WHERE id = %s", (place_id,))
-    cleanup_unreferenced_media(removed_media_ids)
     return {"message": "Place deleted"}
+
+
+@router.post("/{place_id}/restore", response_model=TravelPlace)
+async def restore_place(
+    place_id: str,
+    user: dict = Depends(get_current_user),
+):
+    with get_db_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"SELECT {PLACE_COLUMNS} FROM travel_places "
+                "WHERE id = %s AND deleted_at IS NOT NULL FOR UPDATE",
+                (place_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise HTTPException(status_code=404, detail="Deleted place not found")
+            if not can_manage_place(user, row):
+                raise HTTPException(
+                    status_code=403, detail="Place owner access required"
+                )
+            cursor.execute(
+                "UPDATE travel_places SET deleted_at = NULL "
+                "WHERE id = %s AND deleted_at IS NOT NULL",
+                (place_id,),
+            )
+    return await get_place(place_id, user)
 
 
 @router.post(
@@ -523,7 +581,8 @@ async def create_review(
     with get_db_connection() as connection:
         with connection.cursor() as cursor:
             cursor.execute(
-                f"SELECT {PLACE_COLUMNS} FROM travel_places WHERE id = %s",
+                f"SELECT {PLACE_COLUMNS} FROM travel_places "
+                "WHERE id = %s AND deleted_at IS NULL FOR UPDATE",
                 (place_id,),
             )
             place = cursor.fetchone()

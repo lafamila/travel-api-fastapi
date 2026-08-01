@@ -41,7 +41,7 @@ src/
 ├── auth_utils.py               # cookie/bearer current user, visitor/admin dependency
 ├── connectors/__init__.py      # MySQL DDL, idempotent ownership migration
 ├── routers/
-│   ├── places.py               # /api/places — CRUD, 리뷰, resolve-map-link
+│   ├── places.py               # /api/places — CRUD, soft delete/restore, 리뷰, resolve-map-link
 │   ├── courses.py              # /api/courses — CRUD, export/import
 │   ├── friends.py              # /api/friends — 검색/요청/수락/거절/삭제
 │   ├── imports.py              # /api/imports — 사진 import batch/draft/publish API
@@ -73,7 +73,7 @@ requirements.txt
 | Router | Routes |
 |--------|--------|
 | `session.py` (`/api/session`) | `POST /oidc/start`, `GET /oidc/callback`, `GET /me`, `POST /logout`, `POST /service-application` |
-| `places.py` (`/api/places`) | `GET/POST /api/places`, `GET/PUT/DELETE /api/places/{place_id}`, admin-only `POST /api/places/resolve-map-link`, compatibility `POST /api/places/resolve-google-link`, `POST /api/places/{place_id}/reviews` |
+| `places.py` (`/api/places`) | `GET/POST /api/places`, `GET /api/places/deleted`, `GET/PUT/DELETE /api/places/{place_id}`, `POST /api/places/{place_id}/restore`, admin-only `POST /api/places/resolve-map-link`, compatibility `POST /api/places/resolve-google-link`, `POST /api/places/{place_id}/reviews` |
 | `courses.py` (`/api/courses`) | `GET/POST /api/courses`, `GET/DELETE /api/courses/{course_id}`, `POST /api/courses/export`, `POST /api/courses/import` |
 | `friends.py` (`/api/friends`) | `GET /search`, `POST /requests`, `GET /requests/incoming`, `GET /requests/outgoing`, `POST /requests/{id}/accept`, `POST /requests/{id}/reject`, `GET /api/friends`, `DELETE /api/friends/{account_id}` |
 | `uploads.py` (`/api/uploads`) | `POST /api/uploads` |
@@ -83,7 +83,7 @@ requirements.txt
 
 ## DATABASE
 
-`src/connectors/__init__.py` `init_db()` 가 canonical — 기존 travel 테이블과 함께 `travel_import_batches`, `travel_import_assets`, `travel_import_clusters`, `travel_import_review_drafts`, `travel_import_geocode_cache`, `travel_import_jobs`를 idempotent하게 생성한다. owner가 없는 legacy row는 auth internal account search의 정확한 `lafamila` account로 이관되며, 정확한 계정이 없으면 startup이 명확히 실패한다.
+`src/connectors/__init__.py` `init_db()` 가 canonical — 기존 travel 테이블과 함께 `travel_import_batches`, `travel_import_assets`, `travel_import_clusters`, `travel_import_review_drafts`, `travel_import_geocode_cache`, `travel_import_jobs`를 idempotent하게 생성한다. `travel_places`는 `expectation` (`ordinary`/`confident`, 기본 `ordinary`)과 `deleted_at` 기반 soft delete를 사용한다. owner가 없는 legacy row는 auth internal account search의 정확한 `lafamila` account로 이관되며, 정확한 계정이 없으면 startup이 명확히 실패한다.
 
 ## DEPENDENCIES (requirements.txt)
 
